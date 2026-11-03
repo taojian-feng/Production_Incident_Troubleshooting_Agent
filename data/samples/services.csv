@@ -1,0 +1,5 @@
+service,team,tier,sla_minutes
+payments-api,payments-core,1,30
+ledger-service,ledger,1,60
+auth-service,identity,1,30
+ledger-service,ledger,1,60

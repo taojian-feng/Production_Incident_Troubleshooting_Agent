@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"   # jsii runtime for the CDK synthesis tests
+      - run: uv python install 3.12
+      - run: uv sync --all-extras --group dev --group infra
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type check (mypy --strict)
+        run: uv run mypy src tests
+      - name: Tests (unit + moto integration, 85% coverage gate)
+        run: uv run pytest --cov --cov-report=term-missing
+      - name: Infrastructure tests (CDK synth assertions)
+        run: uv run pytest infra/tests -q
+      - name: Offline benchmark
+        run: uv run incident-agent benchmark

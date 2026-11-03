@@ -1,0 +1,19 @@
+[
+  {"case_id": "gt-payments-504",
+   "alert": {"service": "payments-api", "title": "payments-api 504 rate above 3%",
+             "description": "p99 latency 4.2s, ERR_GATEWAY_TIMEOUT climbing after deploy 2026.11.03-1",
+             "severity": "SEV1", "triggered_at": "2026-11-03T16:25:00Z"},
+   "expected_precedents": ["INC0041877"],
+   "expected_keywords": ["roll back", "task definition"]},
+  {"case_id": "gt-ledger-deadlock",
+   "alert": {"service": "ledger-service", "title": "ORA-00060 errors in ledger-service",
+             "description": "", "severity": "SEV2", "triggered_at": "2026-11-03T16:25:00Z"},
+   "expected_precedents": ["INC0040550"],
+   "expected_keywords": ["reconciliation"]},
+  {"case_id": "gt-auth-401",
+   "alert": {"service": "auth-service", "title": "Spike in 401 unauthorized responses",
+             "description": "Clients report tokens rejected, unable to find signing key",
+             "severity": "SEV2", "triggered_at": "2026-11-03T16:25:00Z"},
+   "expected_precedents": ["INC0042210"],
+   "expected_keywords": ["jwks"]}
+]
