@@ -1,0 +1,13 @@
+{
+  "app": "uv run --project .. python app.py",
+  "watch": { "include": ["**"], "exclude": ["cdk.out", "tests", "**/__pycache__"] },
+  "context": {
+    "lambda_asset_path": "../build/lambda",
+    "alarm_name_prefix": "ia-",
+    "log_group_prefix": "/app/",
+    "monthly_budget_note": "per-run spend is capped in code by IA_MAX_USD_PER_RUN",
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true
+  }
+}

@@ -1,0 +1,137 @@
+[project]
+name = "incident-agent"
+version = "0.1.0"
+description = "Production incident troubleshooting agent: hybrid retrieval, domain-governed tools, grounded step-by-step triage on AWS."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Taojian Feng" }]
+dependencies = [
+    "anthropic[bedrock]>=2.4,<3",
+    "boto3>=1.35",
+    "numpy>=2.0",
+    "pydantic>=2.8,<3",
+]
+
+[project.optional-dependencies]
+# Offline analytics (MTTR, feedback quality). Not shipped to Lambda to keep the bundle small.
+analytics = ["pandas>=2.2"]
+# Expose the domain tool servers over the Model Context Protocol.
+mcp = ["mcp>=2.0"]
+
+[project.scripts]
+incident-agent = "incident_agent.cli:main"
+
+[dependency-groups]
+dev = [
+    "boto3-stubs[bedrock-runtime,dynamodb,logs,s3,sns,lambda]>=1.35",
+    "moto[dynamodb,s3,logs,sns]>=5.0",
+    "mypy>=1.11",
+    "pandas>=2.2",
+    "pandas-stubs>=2.2",
+    "pre-commit>=3.8",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.8",
+]
+infra = ["aws-cdk-lib>=2.150", "constructs>=10.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/incident_agent"]
+
+# --------------------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "infra"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear: mutable defaults, loop-variable capture, etc.
+    "UP",       # pyupgrade: modern syntax (PEP 604/585/695)
+    "SIM",      # simplify
+    "C4",       # comprehensions
+    "PERF",     # perflint: avoid accidental O(n^2) and copies
+    "RUF",      # ruff-specific (mutable class defaults, unused noqa, ...)
+    "ASYNC",    # blocking calls inside async functions
+    "DTZ",      # naive datetimes are a bug in an incident system
+    "PT",       # pytest style
+    "N",        # naming
+    "S",        # bandit security checks
+    "ANN",      # every function is annotated
+    "TC",       # type-checking-only imports
+    "RET", "PIE", "PL",
+    "D",        # docstrings (public API)
+]
+ignore = [
+    "D100", "D104", "D105", "D107",  # module/package/magic/__init__ docstrings are optional
+    "D203", "D213",                  # pick one docstring layout (D211 + D212)
+    "PLR0913",                       # constructor injection legitimately takes many deps
+    "PLR2004",                       # magic numbers are fine in thresholds with names nearby
+    "PLR0917",                       # keyword-only would be noisier than it is safer here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "D", "ANN", "PLR2004", "S311", "S106", "PLC0415", "TC"]
+"infra/**" = ["D", "ANN401"]
+"infra/tests/**" = ["D", "S101", "PLR2004"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Frozen dataclasses are immutable, so sharing one instance as a default is safe.
+extend-immutable-calls = [
+    "incident_agent.reasoning.context.ContextBudget",
+    "incident_agent.ingestion.chunking.ChunkingConfig",
+    "incident_agent.domain.models.CostSummary",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# --------------------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["incident_agent"]
+
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# --------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error", "ignore::DeprecationWarning:botocore.*", "ignore::DeprecationWarning:moto.*"]
+markers = ["integration: uses moto-mocked AWS services"]
+
+[tool.coverage.run]
+source = ["incident_agent"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
