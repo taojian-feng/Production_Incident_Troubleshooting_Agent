@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from incident_agent.domain.enums import EvidenceSource
+from incident_agent.evaluation.harness import log_events
 from incident_agent.ingestion.loaders import iter_markdown_dir, load_incidents
 from incident_agent.ingestion.log_stream import read_jsonl
 from incident_agent.ingestion.pipeline import IngestionPipeline
@@ -28,15 +29,21 @@ from incident_agent.tools.logs import StaticLogsServer
 from incident_agent.tools.tickets import IncidentHistoryServer, InMemoryIncidentRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     import boto3
 
     from incident_agent.config import Settings
+    from incident_agent.evaluation.harness import EvalCase
     from incident_agent.llm.base import EmbeddingProvider, LLMProvider
+    from incident_agent.orchestration.agent import TriageAgent as TriageAgentType
     from incident_agent.tools.base import ToolServer
 
-SAMPLES = Path(__file__).resolve().parents[2] / "data" / "samples"
+DATA = Path(__file__).resolve().parents[2] / "data"
+SAMPLES = DATA / "samples"
+SYNTHETIC = DATA / "synthetic" / "orders-api"
+EVAL_CASES = DATA / "eval" / "cases.json"
+GROUNDING_CASES = DATA / "eval" / "grounding_cases.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +105,30 @@ async def build_local_components(
     docs = [*iter_markdown_dir(samples / "knowledge"), *(i.to_document() for i in incidents)]
     await components.pipeline.ingest(docs)
     return components
+
+
+async def build_eval_agents(  # pragma: no cover - exercised by the eval command and its tests
+    llm: LLMProvider, embedder: EmbeddingProvider, router: ModelRouter, *, max_usd_per_run: float
+) -> Callable[[EvalCase], TriageAgentType]:
+    """Index the sample and synthetic knowledge once; each case gets its own logs."""
+    incidents = [
+        *load_incidents(SAMPLES / "incidents.json"),
+        *load_incidents(SYNTHETIC / "incidents.json"),
+    ]
+    keyword = BM25Index()
+    vector = InMemoryVectorIndex(dim=embedder.dim)
+    tickets = IncidentHistoryServer(InMemoryIncidentRepository.of(incidents))
+
+    def components(logs: ToolServer) -> Components:
+        return _assemble(llm, embedder, router, keyword, vector, logs, tickets, max_usd_per_run)
+
+    documents = [
+        *iter_markdown_dir(SAMPLES / "knowledge"),
+        *iter_markdown_dir(SYNTHETIC / "knowledge"),
+        *(incident.to_document() for incident in incidents),
+    ]
+    await components(StaticLogsServer([])).pipeline.ingest(documents)
+    return lambda case: components(StaticLogsServer(log_events(case))).agent
 
 
 def _claude_backend(  # pragma: no cover - needs AWS

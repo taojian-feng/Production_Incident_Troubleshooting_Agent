@@ -2,7 +2,7 @@
 PY ?= uv run
 LAMBDA_DIR := build/lambda
 
-.PHONY: install fmt lint typecheck test test-infra check package synth deploy demo bench clean
+.PHONY: install fmt lint typecheck test test-infra check package synth deploy demo bench eval-offline eval-live clean
 
 install:            ## Create .venv with runtime + dev + infra dependencies
 	uv sync --all-extras --group dev --group infra
@@ -46,6 +46,12 @@ demo:               ## Run the agent offline on the sample data
 
 bench:              ## Ground-truth benchmark on the sample data
 	$(PY) incident-agent benchmark
+
+eval-offline:       ## Prove the evaluation harness works, with a scripted model (free)
+	$(PY) incident-agent eval
+
+eval-live:          ## Score real models on labelled incidents. Costs about $1. Needs AWS credentials
+	$(PY) incident-agent eval --live
 
 clean:
 	rm -rf build dist .mypy_cache .ruff_cache .pytest_cache .coverage infra/cdk.out

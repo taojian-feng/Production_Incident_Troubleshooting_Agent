@@ -36,7 +36,11 @@ Work only from the numbered evidence provided. Produce steps in this order:
 Cite the evidence ids (for example "E2") that support each step in its "citations"
 list. If the evidence does not support a step, say so plainly in that step and leave
 its citations empty rather than guessing; such steps are routed to a human reviewer.
-Mention ticket ids and error codes exactly as they appear in the evidence."""
+Mention ticket ids and error codes exactly as they appear in the evidence. Automated
+checks flag any step that names a ticket id or error code without citing an evidence item
+containing it, so cite that item, even when you mention the id only to compare or rule it
+out. Do not recommend an action unless a cited item describes it or it is a diagnostic
+check that follows directly from the cited facts."""
 
 _OUTPUT_SCHEMA: Final = LLMTriageOutput.model_json_schema()
 
@@ -98,7 +102,7 @@ class ReasoningEngine:
             except ValidationError as exc:
                 msg = "model output failed schema validation twice"
                 raise LLMOutputError(msg) from exc
-        steps = validate_steps(parsed.steps, evidence)
+        steps = validate_steps(parsed.steps, evidence, alert.text)
         if self.grounding is None:
             return steps
         return await self.grounding.check(alert, steps, evidence, ledger)

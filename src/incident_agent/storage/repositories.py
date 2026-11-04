@@ -78,6 +78,15 @@ class DynamoFeedbackStore:
         """Persist one feedback entry."""
         self.table.put_item(Item=_to_dynamo(feedback))
 
+    def scan_all(self) -> list[Feedback]:
+        """Every feedback entry, for exporting candidate evaluation cases."""
+        response = self.table.scan()
+        items = list(response["Items"])
+        while "LastEvaluatedKey" in response:
+            response = self.table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            items.extend(response["Items"])
+        return [Feedback.model_validate_json(json.dumps(i, default=str)) for i in items]
+
     def for_report(self, report_id: str) -> list[Feedback]:
         """All feedback for a report, oldest first."""
         items = self.table.query(KeyConditionExpression=Key("report_id").eq(report_id))["Items"]

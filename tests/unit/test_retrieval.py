@@ -9,6 +9,7 @@ from incident_agent.retrieval.hybrid import HybridRetriever, plan_retrieval, rec
 from incident_agent.retrieval.keyword import BM25Index
 from incident_agent.retrieval.text import extract_error_codes, extract_ticket_ids, tokenize
 from incident_agent.retrieval.vector import InMemoryVectorIndex
+from incident_agent.tools.knowledge import KnowledgeServer
 
 CHUNKS = [
     Chunk("a", "d1", "gateway timeout ERR_GATEWAY_TIMEOUT from acquirer", {"service": "pay"}),
@@ -134,3 +135,35 @@ def test_snapshot_load_rejects_vectors_and_chunks_from_different_writes() -> Non
     assert len(InMemoryVectorIndex.from_bytes(old_npz, old_jsonl)) == 1
     with pytest.raises(ValueError, match="snapshot mismatch"):
         InMemoryVectorIndex.from_bytes(new_npz, old_jsonl)
+
+
+async def test_knowledge_search_adds_the_fix_from_the_best_matching_runbook() -> None:
+    def chunk(chunk_id: str, doc_id: str, section: str, text: str) -> Chunk:
+        return Chunk(
+            chunk_id=chunk_id,
+            doc_id=doc_id,
+            text=text,
+            metadata={"section": section, "service": "orders-api"},
+        )
+
+    chunks = [
+        chunk("tax#symptoms", "tax", "Symptoms", "ERR_TAX_QUOTE_STALE on checkout"),
+        chunk("tax#mitigation", "tax", "Mitigation", "Rerun the sync job"),
+        chunk("tax#escalation", "tax", "Escalation", "Page the secondary"),
+        chunk("other#mitigation", "other", "Mitigation", "Restart the cache"),
+    ]
+    embedder = HashingEmbedder(dim=64)
+    keyword = BM25Index()
+    keyword.add(chunks)
+    vector = InMemoryVectorIndex(dim=64)
+    vector.upsert(chunks, await embedder.embed([c.text for c in chunks]))
+    server = KnowledgeServer(HybridRetriever(keyword=keyword, vector=vector, embedder=embedder))
+    alert = Alert(service="orders-api", title="ERR_TAX_QUOTE_STALE on checkout")
+
+    evidence = await server.gather(alert, plan_retrieval(alert))
+
+    refs = [e.ref for e in evidence]
+    assert refs[0] == "tax#symptoms"
+    assert "tax#mitigation" in refs
+    assert "other#mitigation" not in refs
+    assert "tax#escalation" not in refs

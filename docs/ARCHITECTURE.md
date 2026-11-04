@@ -12,9 +12,11 @@ How each section of the system design is realised in code and on AWS.
 2. **Plan** (`retrieval/hybrid.py` `plan_retrieval`). Deterministic, no LLM spend: alerts
    dominated by identifiers (ticket ids, error codes) use keyword search, prose-only
    alerts use vector search, mixed alerts use both with reciprocal rank fusion.
-3. **Gather** (`orchestration/agent.py`). The three domain tool servers run concurrently,
-   each on its own forked copy of the state, through `ToolRegistry`, which enforces the
-   role -> domain policy and records success/failure/latency.
+3. **Gather** (`orchestration/agent.py`). Logs run first, and their top errors are added to
+   the search terms and the plan is recalculated, because an alarm's own text is often
+   generic. Tickets and knowledge then run concurrently, each on its own forked copy of the
+   state. Every call goes through `ToolRegistry`, which enforces the role -> domain policy and
+   records success/failure/latency.
 4. **Context engineering** (`reasoning/context.py`). At most N items per domain,
    round-robin across domains, under a character budget, numbered `E1..En`.
 5. **Reason** (`reasoning/engine.py`). The router picks a model by task and severity;
@@ -44,8 +46,8 @@ How each section of the system design is realised in code and on AWS.
 | 4.1 Model flexibility | `LLMProvider` / `EmbeddingProvider` Protocols; Bedrock adapters in `llm/bedrock.py` and a Claude API adapter in `llm/anthropic_api.py`. No Azure OpenAI or Gemini adapter exists yet; each only needs to implement `complete`. |
 | 4.1 Task-based routing | `llm/router.py`: reasoning -> Sonnet 5.5, reasoning on SEV1/SEV2 -> Opus 5.5, grounding (classify) -> Haiku 5.5. The extract and summarise routes exist but have no callers yet. Per-run budget in `CostLedger`. |
 | 4.2 Telemetry | `observability/metrics.py` EMF: latency, tokens, cost, tool success/failure, unverified steps; CloudWatch dashboard and alarms in the CDK stack; X-Ray tracing on all functions. |
-| 4.2 Ground-truth benchmarking | `evaluation/benchmark.py`, `data/samples/ground_truth.json`, `make bench` in CI. |
-| 4.2 Feedback loop | `POST /reports/{id}/feedback` -> DynamoDB; `feedback_to_cases` turns corrected thumbs-down into candidate eval cases; `analytics.feedback_quality` reports thumbs-up rate by retrieval mode. |
+| 4.2 Ground-truth benchmarking | `evaluation/harness.py` scores real models on `data/eval/`; see `docs/EVALUATION.md`. `evaluation/benchmark.py` is a fast offline retrieval check in CI. |
+| 4.2 Feedback loop | `POST /reports/{id}/feedback` -> DynamoDB; `incident-agent export-feedback` turns corrected thumbs-down into candidate eval cases for review; `analytics.feedback_quality` reports thumbs-up rate by retrieval mode. |
 | 5 Snowflake | Not wired in this iteration: the `IncidentRepository` Protocol is the seam for a Snowflake-backed implementation. |
 
 ## AWS resources (infra/stacks/incident_agent_stack.py)

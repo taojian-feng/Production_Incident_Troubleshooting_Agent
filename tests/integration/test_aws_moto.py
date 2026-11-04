@@ -104,6 +104,7 @@ class TestDynamo:
             Feedback(report_id=report.report_id, rating="up", user="arn:aws:iam::1:user/a")
         )
         assert [f.rating for f in feedback.for_report(report.report_id)] == ["up"]
+        assert [f.rating for f in feedback.scan_all()] == ["up"]
 
 
 @pytest.mark.usefixtures("aws")
