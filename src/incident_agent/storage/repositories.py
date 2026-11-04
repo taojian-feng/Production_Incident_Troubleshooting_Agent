@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
@@ -17,6 +19,8 @@ from incident_agent.retrieval.vector import InMemoryVectorIndex
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb.service_resource import Table
     from mypy_boto3_s3 import S3Client
+
+_WRITE_CONFLICT_CODES = {"PreconditionFailed", "412", "ConditionalRequestConflict", "409"}
 
 
 def _to_dynamo(model: TriageReport | Feedback) -> dict[str, Any]:
@@ -110,38 +114,61 @@ class InMemoryReportStore:
 
 @dataclass(slots=True)
 class S3IndexSnapshot:
-    """Stores the vector matrix + chunk metadata in S3; rebuilds BM25 on load."""
+    """One S3 object holding the vector matrix and chunk metadata; BM25 is rebuilt on load.
+
+    A single object means a reader can never see half an update, and writers use
+    conditional puts so concurrent updates cannot overwrite each other.
+    """
 
     client: S3Client
     bucket: str
-    prefix: str = "index/"
+    key: str = "index/snapshot.zip"
 
     def version(self) -> str | None:
-        """ETag of ``chunks.jsonl``, which ``save`` writes last; ``None`` if no snapshot exists."""
+        """ETag of the snapshot; ``None`` if no snapshot exists."""
         try:
-            head = self.client.head_object(Bucket=self.bucket, Key=f"{self.prefix}chunks.jsonl")
+            return self.client.head_object(Bucket=self.bucket, Key=self.key)["ETag"]
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
                 return None
             raise
-        return head["ETag"]
 
-    def save(self, index: InMemoryVectorIndex) -> None:
-        """Upload ``vectors.npz`` and ``chunks.jsonl``."""
+    def save_if_unchanged(self, index: InMemoryVectorIndex, version: str | None) -> bool:
+        """Write only if the snapshot is still at ``version``; ``False`` if someone else wrote."""
         npz, jsonl = index.to_bytes()
-        self.client.put_object(Bucket=self.bucket, Key=f"{self.prefix}vectors.npz", Body=npz)
-        self.client.put_object(Bucket=self.bucket, Key=f"{self.prefix}chunks.jsonl", Body=jsonl)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("vectors.npz", npz)
+            archive.writestr("chunks.jsonl", jsonl)
+        body = buffer.getvalue()
+        try:
+            if version is None:
+                self.client.put_object(Bucket=self.bucket, Key=self.key, Body=body, IfNoneMatch="*")
+            else:
+                self.client.put_object(Bucket=self.bucket, Key=self.key, Body=body, IfMatch=version)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in _WRITE_CONFLICT_CODES:
+                return False
+            raise
+        return True
+
+    def load_versioned(self, dim: int) -> tuple[InMemoryVectorIndex, BM25Index, str | None]:
+        """Download the snapshot with its version; an empty index if none exists yet."""
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=self.key)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return InMemoryVectorIndex(dim), BM25Index(), None
+            raise
+        with zipfile.ZipFile(io.BytesIO(response["Body"].read())) as archive:
+            vectors = InMemoryVectorIndex.from_bytes(
+                archive.read("vectors.npz"), archive.read("chunks.jsonl")
+            )
+        keyword = BM25Index()
+        keyword.add(vectors.chunks())
+        return vectors, keyword, response["ETag"]
 
     def load(self, dim: int) -> tuple[InMemoryVectorIndex, BM25Index]:
         """Download the snapshot; an empty index if none exists yet."""
-        try:
-            npz = self.client.get_object(Bucket=self.bucket, Key=f"{self.prefix}vectors.npz")
-            jsonl = self.client.get_object(Bucket=self.bucket, Key=f"{self.prefix}chunks.jsonl")
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
-                return InMemoryVectorIndex(dim), BM25Index()
-            raise
-        vectors = InMemoryVectorIndex.from_bytes(npz["Body"].read(), jsonl["Body"].read())
-        keyword = BM25Index()
-        keyword.add(vectors.chunks())
+        vectors, keyword, _version = self.load_versioned(dim)
         return vectors, keyword

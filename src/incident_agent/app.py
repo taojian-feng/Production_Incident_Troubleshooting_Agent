@@ -209,10 +209,18 @@ def build_domain_server(  # pragma: no cover - needs AWS
     return KnowledgeServer(HybridRetriever(keyword=keyword, vector=vector, embedder=embedder))
 
 
-def build_ingest_pipeline(settings: Settings) -> IngestionPipeline:  # pragma: no cover - needs AWS
-    """The ingest function's pipeline over the current index snapshot."""
-    embedder, keyword, vector = _aws_index(settings, boto3.Session(region_name=settings.region))
-    return IngestionPipeline(embedder=embedder, keyword=keyword, vector=vector)
+def ingest_pipeline_factory(  # pragma: no cover - needs AWS
+    settings: Settings,
+) -> Callable[[BM25Index, InMemoryVectorIndex], IngestionPipeline]:
+    """How the ingest function builds a pipeline around each freshly loaded snapshot."""
+    embedder = TitanEmbedder(
+        boto3.client("bedrock-runtime", region_name=settings.region),
+        model_id=settings.embedding_model_id,
+        dim=settings.embedding_dim,
+    )
+    return lambda keyword, vector: IngestionPipeline(
+        embedder=embedder, keyword=keyword, vector=vector
+    )
 
 
 def build_aws_components(settings: Settings) -> Runtime:  # pragma: no cover - needs AWS

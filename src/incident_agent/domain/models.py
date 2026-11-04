@@ -107,7 +107,9 @@ class SourceDocument(FrozenModel):
     doc_id: NonEmptyStr
     title: NonEmptyStr
     body: str
-    doc_type: Literal["runbook", "postmortem", "architecture", "incident"] = "runbook"
+    doc_type: Literal["log_pattern", "runbook", "postmortem", "architecture", "incident"] = (
+        "runbook"
+    )
     service: str | None = None
     uri: str | None = None
 
@@ -145,6 +147,100 @@ class HistoricalIncident(FrozenModel):
             body=body,
             doc_type="incident",
             service=self.service,
+        )
+
+
+# --------------------------------------------------------------------------- ticket feeds
+
+
+class ExternalPayload(BaseModel):
+    """Data from another system: validated, immutable, and tolerant of extra fields."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+
+class _JiraName(ExternalPayload):
+    name: str = ""
+
+
+class _JiraResolution(_JiraName):
+    description: str = ""
+
+
+class _JiraFields(ExternalPayload):
+    summary: NonEmptyStr
+    description: str | None = ""
+    priority: _JiraName = _JiraName()
+    components: tuple[_JiraName, ...] = Field(min_length=1)
+    labels: tuple[str, ...] = ()
+    created: datetime
+    resolutiondate: datetime | None = None
+    resolution: _JiraResolution | None = None
+    customfield_root_cause: str | None = ""
+
+
+class _JiraIssue(ExternalPayload):
+    key: NonEmptyStr
+    fields: _JiraFields
+
+
+class JiraWebhook(ExternalPayload):
+    """The parts of a Jira issue webhook that describe an incident."""
+
+    issue: _JiraIssue
+
+    def to_incident(self) -> HistoricalIncident:
+        """Normalise to the shared incident model. The first component names the service."""
+        fields = self.issue.fields
+        severities = {"highest": Severity.SEV1, "high": Severity.SEV2}
+        return HistoricalIncident(
+            incident_id=self.issue.key,
+            service=fields.components[0].name,
+            title=fields.summary,
+            summary=fields.description or "",
+            root_cause=fields.customfield_root_cause or "",
+            resolution=fields.resolution.description if fields.resolution else "",
+            severity=severities.get(fields.priority.name.lower(), Severity.SEV3),
+            opened_at=fields.created.astimezone(UTC),
+            resolved_at=fields.resolutiondate.astimezone(UTC) if fields.resolutiondate else None,
+            tags=fields.labels,
+        )
+
+
+class _ServiceNowReference(ExternalPayload):
+    display_value: NonEmptyStr
+
+
+class ServiceNowIncident(ExternalPayload):
+    """The parts of a ServiceNow incident record that describe an incident."""
+
+    number: NonEmptyStr
+    short_description: NonEmptyStr
+    description: str = ""
+    priority: str = ""
+    cmdb_ci: _ServiceNowReference
+    opened_at: NonEmptyStr
+    resolved_at: str = ""
+    close_notes: str = ""
+    u_root_cause: str = ""
+
+    def to_incident(self) -> HistoricalIncident:
+        """Normalise to the shared incident model. ServiceNow timestamps are UTC by default."""
+        severities = {"1": Severity.SEV1, "2": Severity.SEV2}
+
+        def parse(value: str) -> datetime:
+            return datetime.fromisoformat(value).replace(tzinfo=UTC)
+
+        return HistoricalIncident(
+            incident_id=self.number,
+            service=self.cmdb_ci.display_value,
+            title=self.short_description,
+            summary=self.description,
+            root_cause=self.u_root_cause,
+            resolution=self.close_notes,
+            severity=severities.get(self.priority[:1], Severity.SEV3),
+            opened_at=parse(self.opened_at),
+            resolved_at=parse(self.resolved_at) if self.resolved_at else None,
         )
 
 

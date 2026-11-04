@@ -167,3 +167,35 @@ async def test_knowledge_search_adds_the_fix_from_the_best_matching_runbook() ->
     assert "tax#mitigation" in refs
     assert "other#mitigation" not in refs
     assert "tax#escalation" not in refs
+
+
+async def test_log_patterns_cannot_displace_a_runbooks_fix() -> None:
+    def chunk(chunk_id: str, doc_id: str, section: str, doc_type: str, text: str) -> Chunk:
+        return Chunk(
+            chunk_id=chunk_id,
+            doc_id=doc_id,
+            text=text,
+            metadata={"service": "orders-api", "doc_type": doc_type, "section": section},
+        )
+
+    chunks = [
+        chunk("log1#0", "log1", "Pattern", "log_pattern", "ERR_SAME_CODE timed out"),
+        chunk("log2#0", "log2", "Pattern", "log_pattern", "ERR_SAME_CODE timed out again"),
+        chunk("runbook#symptoms", "runbook", "Symptoms", "runbook", "ERR_SAME_CODE on checkout"),
+        chunk("runbook#mitigation", "runbook", "Mitigation", "runbook", "Restart the service"),
+    ]
+    embedder = HashingEmbedder(dim=64)
+    keyword = BM25Index()
+    keyword.add(chunks)
+    vector = InMemoryVectorIndex(dim=64)
+    vector.upsert(chunks, await embedder.embed([c.text for c in chunks]))
+    server = KnowledgeServer(HybridRetriever(keyword=keyword, vector=vector, embedder=embedder))
+    alert = Alert(service="orders-api", title="ERR_SAME_CODE")
+
+    evidence = await server.gather(alert, plan_retrieval(alert))
+
+    scores = {e.ref: e.score for e in evidence}
+    assert "runbook#mitigation" in scores
+    assert sum(ref.startswith("log") for ref in scores) == 1
+    log_score = next(score for ref, score in scores.items() if ref.startswith("log"))
+    assert scores["runbook#mitigation"] > log_score

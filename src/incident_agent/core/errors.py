@@ -41,6 +41,10 @@ class ToolCallError(IncidentAgentError):
     """A remote tool server could not be reached or reported a failure."""
 
 
+class SnapshotConflictError(IncidentAgentError):
+    """Other writers kept changing the index snapshot until the retries ran out."""
+
+
 class BudgetExceededError(IncidentAgentError):
     """A triage run exceeded its token/cost budget (FinOps guardrail)."""
 

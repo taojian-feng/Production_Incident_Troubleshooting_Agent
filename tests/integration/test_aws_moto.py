@@ -15,10 +15,16 @@ from botocore.stub import Stubber
 from moto import mock_aws
 
 from incident_agent.app import Components
+from incident_agent.core.errors import SnapshotConflictError
 from incident_agent.domain import Alert, Feedback, HistoricalIncident, RetrievalMode, Severity
+from incident_agent.domain.models import SourceDocument
 from incident_agent.domain.state import RetrievalPlan
 from incident_agent.domain.values import Chunk
-from incident_agent.handlers.ingest import iter_s3_documents, reindex
+from incident_agent.handlers.ingest import iter_s3_documents, reindex, update_snapshot
+from incident_agent.handlers.log_sync import LogPatternDocument, store_new_patterns
+from incident_agent.ingestion.pipeline import IngestionPipeline
+from incident_agent.llm.local import HashingEmbedder
+from incident_agent.retrieval.keyword import BM25Index
 from incident_agent.retrieval.vector import InMemoryVectorIndex
 from incident_agent.storage.repositories import (
     DynamoFeedbackStore,
@@ -116,14 +122,84 @@ class TestS3:
         assert snapshot.version() is None
 
         index = InMemoryVectorIndex(dim=2)
-        snapshot.save(index)
+        assert snapshot.save_if_unchanged(index, None)
         empty_version = snapshot.version()
         assert empty_version is not None
 
         chunk = Chunk(chunk_id="c1", doc_id="d1", text="x")
         index.upsert([chunk], np.array([[1.0, 0.0]], dtype=np.float32))
-        snapshot.save(index)
+        assert snapshot.save_if_unchanged(index, empty_version)
         assert snapshot.version() != empty_version
+
+    def test_a_writer_with_a_stale_version_cannot_overwrite_a_newer_snapshot(self) -> None:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.create_bucket(Bucket="kb-bucket")
+        snapshot = S3IndexSnapshot(s3, "kb-bucket")
+        index = InMemoryVectorIndex(dim=2)
+        assert snapshot.save_if_unchanged(index, None)
+        stale = snapshot.version()
+
+        chunk = Chunk(chunk_id="c1", doc_id="d1", text="x")
+        index.upsert([chunk], np.array([[1.0, 0.0]], dtype=np.float32))
+        assert snapshot.save_if_unchanged(index, stale)
+        assert not snapshot.save_if_unchanged(InMemoryVectorIndex(dim=2), stale)
+        assert not snapshot.save_if_unchanged(InMemoryVectorIndex(dim=2), None)
+        vectors, _keyword = snapshot.load(dim=2)
+        assert len(vectors) == 1
+
+    async def test_concurrent_uploads_both_end_up_in_the_index(self) -> None:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.create_bucket(Bucket="kb-bucket")
+        snapshot = S3IndexSnapshot(s3, "kb-bucket")
+        embedder = HashingEmbedder(dim=64)
+        mine = SourceDocument(doc_id="mine", title="Mine", body="# Mine\n## Fix\nrestart it")
+        builds = 0
+
+        def pipeline_for(keyword: BM25Index, vector: InMemoryVectorIndex) -> IngestionPipeline:
+            nonlocal builds
+            builds += 1
+            if builds == 1:
+                # Another writer saves after this one loaded, so this one's write must fail.
+                rival, _keyword, version = snapshot.load_versioned(64)
+                chunk = Chunk(chunk_id="rival#0", doc_id="rival", text="roll back")
+                rival.upsert([chunk], np.ones((1, 64), dtype=np.float32))
+                assert snapshot.save_if_unchanged(rival, version)
+            return IngestionPipeline(embedder, keyword, vector)
+
+        stats = await update_snapshot(snapshot, pipeline_for, [mine], dim=64)
+
+        assert stats.documents == 1
+        assert builds == 2
+        vectors, _keyword = snapshot.load(dim=64)
+        assert {chunk.doc_id for chunk in vectors.chunks()} == {"mine", "rival"}
+
+    async def test_update_gives_up_after_repeated_conflicts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.create_bucket(Bucket="kb-bucket")
+        snapshot = S3IndexSnapshot(s3, "kb-bucket")
+        monkeypatch.setattr(snapshot.__class__, "save_if_unchanged", lambda *_args: False)
+        monkeypatch.setattr("incident_agent.handlers.ingest.WRITE_RETRY_BASE_S", 0.0)
+        doc = SourceDocument(doc_id="d", title="D", body="# D\n## Fix\nretry")
+        with pytest.raises(SnapshotConflictError):
+            await update_snapshot(
+                snapshot,
+                lambda keyword, vector: IngestionPipeline(HashingEmbedder(64), keyword, vector),
+                [doc],
+                dim=64,
+                max_attempts=2,
+            )
+
+    def test_new_log_patterns_are_stored_once(self) -> None:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.create_bucket(Bucket="kb-bucket")
+        document = LogPatternDocument(key="knowledge/log-a-1.md", body="first")
+        assert store_new_patterns(s3, "kb-bucket", [document]) == [document.key]
+        repeat = LogPatternDocument(key=document.key, body="second")
+        assert store_new_patterns(s3, "kb-bucket", [repeat]) == []
+        stored = s3.get_object(Bucket="kb-bucket", Key=document.key)["Body"].read()
+        assert stored == b"first"
 
     def test_snapshot_version_raises_when_access_is_denied(self) -> None:
         s3 = boto3.client("s3", region_name=REGION)
@@ -193,7 +269,7 @@ class TestS3:
         assert [i.incident_id for i in sink.items] == ["INC0050000"]
         assert len(local.pipeline.vector) > before
 
-        snapshot.save(local.pipeline.vector)
+        assert snapshot.save_if_unchanged(local.pipeline.vector, snapshot.version())
         vectors, keyword = snapshot.load(dim=256)
         assert len(vectors) == len(keyword) == len(local.pipeline.vector)
         assert keyword.search("rates poller")[0].chunk.doc_id == "new+runbook"
