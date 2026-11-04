@@ -34,6 +34,7 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_lambda_event_sources as sources
 from aws_cdk import aws_logs as logs
+from aws_cdk import aws_logs_destinations as destinations
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_sns as sns
@@ -166,8 +167,6 @@ class IncidentAgentStack(Stack):
             "incident_agent.handlers.ingest.handler",
             timeout=Duration.minutes(5),
             memory=1769,
-            # Serialises index snapshot writes. Without it, concurrent uploads can lose entries.
-            reserved_concurrent_executions=self._ingest_reservation(),
         )
         api_fn = function(
             "Api",
@@ -189,6 +188,8 @@ class IncidentAgentStack(Stack):
         bucket.grant_read_write(ingest, "index/*")
         bucket.grant_read(knowledge_mcp, "index/*")
         bucket.grant_read(ingest, "knowledge/*")
+        bucket.grant_put(api_fn, "knowledge/*")
+        self._add_log_sync(function, bucket, log_prefix)
         incidents.grant_read_data(tickets_mcp)
         incidents.grant_read_write_data(ingest)
         reports.grant_write_data(triage)
@@ -282,6 +283,8 @@ class IncidentAgentStack(Stack):
             (apigw.HttpMethod.POST, "/alerts"),
             (apigw.HttpMethod.GET, "/reports/{report_id}"),
             (apigw.HttpMethod.POST, "/reports/{report_id}/feedback"),
+            (apigw.HttpMethod.POST, "/tickets/jira"),
+            (apigw.HttpMethod.POST, "/tickets/servicenow"),
         ):
             http_api.add_routes(path=path, methods=[method], integration=integration)
         return http_api
@@ -341,11 +344,32 @@ class IncidentAgentStack(Stack):
             alarm_description="Alerts failed triage and landed in the DLQ.",
         )
 
-    def _ingest_reservation(self) -> int | None:
-        """Default 1. New accounts have a Lambda limit of 10, which rejects any reservation."""
-        configured = self.node.try_get_context("ingest_reserved_concurrency")
-        # CLI context values arrive as strings; 0 skips the reservation.
-        return (1 if configured is None else int(configured)) or None
+    def _add_log_sync(
+        self, function: Callable[..., lambda_.Function], bucket: s3.Bucket, log_prefix: str
+    ) -> None:
+        """Index first-seen error patterns from the log groups named in context."""
+        configured: str = self.node.try_get_context("log_sync_groups") or ""
+        groups = [group.strip() for group in configured.split(",") if group.strip()]
+        if not groups:
+            return
+        sync = function(
+            "LogSync",
+            "incident_agent.handlers.log_sync.handler",
+            timeout=Duration.seconds(30),
+            memory=256,
+        )
+        bucket.grant_put(sync, "knowledge/log-*")
+        for group in groups:
+            if not group.startswith(log_prefix):
+                msg = f"{group} is outside the configured log group prefix {log_prefix}"
+                raise ValueError(msg)
+            logs.SubscriptionFilter(
+                self,
+                f"LogSync{group.replace('/', '').replace('-', '')}",
+                log_group=logs.LogGroup.from_log_group_name(self, f"Group{group}", group),
+                destination=destinations.LambdaDestination(sync),
+                filter_pattern=logs.FilterPattern.any_term("ERROR", "Exception", "FATAL"),
+            )
 
     def _add_budget_alert(self, stage: str) -> None:
         """Email on account-wide AWS spend. Both context values are needed to create it."""

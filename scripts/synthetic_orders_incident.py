@@ -28,7 +28,7 @@ ALARM = f"ia-{SERVICE}-5xx"
 NAMESPACE = "Synthetic/OrdersApi"
 METRIC = "Http5xxRate"
 DATA = Path(__file__).resolve().parents[1] / "data" / "synthetic" / SERVICE
-INDEX_KEY = "index/vectors.npz"
+INDEX_KEY = "index/snapshot.zip"
 ERRORS = (
     "ERROR ERR_CACHE_TIMEOUT RedisCommandTimeoutException: command timed out after 500ms",
     "ERROR READONLY You can't write against a read only replica. host=orders-cache-002",

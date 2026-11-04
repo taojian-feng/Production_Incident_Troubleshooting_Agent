@@ -45,8 +45,16 @@ aws s3 cp build/ s3://<KnowledgeBucket>/knowledge/ --recursive --exclude "*" --i
 ```
 
 Each upload triggers the ingest Lambda, which re-indexes and writes `index/` snapshots.
-Running functions check the snapshot on every invocation and reload it when it changes,
-so new knowledge is used on the next triage without a restart.
+The knowledge server checks the snapshot on every invocation and reloads it when it changes,
+so new knowledge is used on the next triage without a restart. Files can be uploaded at the
+same time: a writer that loses the race reloads the latest snapshot and applies its documents
+again.
+
+## Send tickets
+
+Jira and ServiceNow webhooks go to `POST /tickets/jira` and `POST /tickets/servicenow`, using
+IAM-signed requests. Each ticket is indexed within seconds. `scripts/synthetic_ticket_feed.py`
+sends synthetic examples. This repo has no connection to a real Jira or ServiceNow instance.
 
 ## Try it with a synthetic service
 
@@ -80,7 +88,7 @@ aws cloudwatch put-metric-alarm --alarm-name ia-payments-api-5xx \
 | `IA_EMBEDDING_DIM` | `512` | Titan v2 output dimensions |
 | `-c alarm_name_prefix=` | `ia-` | Which alarms trigger triage |
 | `-c log_group_prefix=` | `/app/` | Log groups the triage role may read |
-| `-c ingest_reserved_concurrency=` | `1` | Use `0` where the account's Lambda limit is too low to reserve; then upload knowledge one file at a time |
+| `-c log_sync_groups=` | unset | Comma-separated log groups to subscribe, which must already exist. Their first-seen error patterns are indexed |
 | `-c budget_email=` and `-c monthly_budget_usd=` | unset | Email at 80% and 100% of actual AWS spend and 100% of forecast. Covers the whole account, not Anthropic API usage. Set both or no budget is created |
 | `-c ui_origins=` | `http://localhost:5173` | CORS origins for the analyst UI |
 

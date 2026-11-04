@@ -17,7 +17,13 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from incident_agent.domain.models import Alert, Feedback
+from incident_agent.domain.models import (
+    Alert,
+    Feedback,
+    HistoricalIncident,
+    JiraWebhook,
+    ServiceNowIncident,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,6 +50,7 @@ class Api:
     reports: ReportStore
     feedback: FeedbackStore
     start_triage: Callable[[Alert, str], None]
+    publish_ticket: Callable[[HistoricalIncident], None]
 
     def handle(self, event: dict[str, Any]) -> Response:
         """Dispatch on ``routeKey`` via a dict (O(1), no if/elif ladder)."""
@@ -51,6 +58,8 @@ class Api:
             "POST /alerts": self.submit_alert,
             "GET /reports/{report_id}": self.get_report,
             "POST /reports/{report_id}/feedback": self.post_feedback,
+            "POST /tickets/jira": self.receive_jira,
+            "POST /tickets/servicenow": self.receive_servicenow,
         }
         route = routes.get(event.get("routeKey", ""))
         if route is None:
@@ -70,6 +79,20 @@ class Api:
         report_id = f"rpt-{uuid4().hex[:12]}"
         self.start_triage(alert, report_id)
         return _json(202, {"report_id": report_id, "alert_id": alert.alert_id})
+
+    def receive_jira(self, event: dict[str, Any]) -> Response:
+        """Index a Jira issue webhook."""
+        webhook = JiraWebhook.model_validate_json(event.get("body") or "{}")
+        return self._publish(webhook.to_incident())
+
+    def receive_servicenow(self, event: dict[str, Any]) -> Response:
+        """Index a ServiceNow incident record."""
+        record = ServiceNowIncident.model_validate_json(event.get("body") or "{}")
+        return self._publish(record.to_incident())
+
+    def _publish(self, incident: HistoricalIncident) -> Response:
+        self.publish_ticket(incident)
+        return _json(202, {"incident_id": incident.incident_id})
 
     def get_report(self, event: dict[str, Any]) -> Response:
         """Return the report JSON, including its computed ``status``."""
@@ -117,9 +140,20 @@ def handler(event: dict[str, Any], context: object) -> Response:  # pragma: no c
             Payload=json.dumps({"alert": alert.model_dump(mode="json"), "report_id": report_id}),
         )
 
+    s3 = boto3.client("s3", region_name=settings.region)
+
+    def publish(incident: HistoricalIncident) -> None:
+        # The upload triggers the ingest function, which indexes it and upserts the table.
+        s3.put_object(
+            Bucket=settings.knowledge_bucket,
+            Key=f"knowledge/{incident.incident_id}.json",
+            Body=incident.model_dump_json().encode(),
+        )
+
     api = Api(
         reports=DynamoReportStore(dynamo.Table(settings.reports_table)),
         feedback=DynamoFeedbackStore(dynamo.Table(settings.feedback_table)),
         start_triage=start,
+        publish_ticket=publish,
     )
     return api.handle(event)

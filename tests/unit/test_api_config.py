@@ -29,7 +29,12 @@ def api() -> tuple[Api, list[tuple[Alert, str]], ListFeedback]:
     started: list[tuple[Alert, str]] = []
     feedback = ListFeedback()
     return (
-        Api(InMemoryReportStore(), feedback, lambda a, r: started.append((a, r))),
+        Api(
+            InMemoryReportStore(),
+            feedback,
+            lambda a, r: started.append((a, r)),
+            lambda _incident: None,
+        ),
         started,
         feedback,
     )

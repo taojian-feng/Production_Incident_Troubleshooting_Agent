@@ -1,0 +1,17 @@
+{
+  "webhookEvent": "jira:issue_updated",
+  "issue": {
+    "key": "PAY-1432",
+    "fields": {
+      "summary": "Refund API returning 409 after ledger schema change",
+      "description": "Synthetic example. ERR_REFUND_CONFLICT on 4% of refunds after the ledger migration.",
+      "priority": {"name": "High"},
+      "components": [{"name": "payments-api"}],
+      "labels": ["synthetic", "refunds"],
+      "created": "2026-10-20T14:02:00.000+0000",
+      "resolutiondate": "2026-10-20T15:10:00.000+0000",
+      "customfield_root_cause": "The ledger migration added a unique constraint that refund retries violated.",
+      "resolution": {"name": "Fixed", "description": "Made refund retries idempotent with a request key."}
+    }
+  }
+}

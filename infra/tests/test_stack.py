@@ -42,10 +42,6 @@ def test_python_lambdas_on_arm(template: Template) -> None:
             "TracingConfig": {"Mode": "Active"},
         },
     )
-    template.has_resource_properties(
-        "AWS::Lambda::Function",
-        {"Handler": "incident_agent.handlers.ingest.handler", "ReservedConcurrentExecutions": 1},
-    )
 
 
 def test_bucket_is_private_encrypted_tls_only(template: Template) -> None:
@@ -111,6 +107,8 @@ def test_api_routes_require_iam(template: Template) -> None:
         "POST /alerts",
         "GET /reports/{report_id}",
         "POST /reports/{report_id}/feedback",
+        "POST /tickets/jira",
+        "POST /tickets/servicenow",
     }
     assert {r["Properties"]["AuthorizationType"] for r in routes.values()} == {"AWS_IAM"}
 
@@ -183,25 +181,41 @@ def test_key_secret_is_readable_by_triage_only_and_skips_mantle(
     assert not [s for s in statements if s["Action"] == "bedrock-mantle:CreateInference"]
 
 
-def test_ingest_reservation_can_be_skipped_for_low_limit_accounts(
+def test_log_sync_subscribes_only_to_configured_groups_and_writes_only_log_patterns(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    asset = tmp_path_factory.mktemp("lambda-limit")
+    asset = tmp_path_factory.mktemp("lambda-logsync")
     (asset / "placeholder.txt").write_text("asset")
-    app = cdk.App(context={"lambda_asset_path": str(asset), "ingest_reserved_concurrency": "0"})
+    app = cdk.App(context={"lambda_asset_path": str(asset), "log_sync_groups": "/app/orders-api"})
     stack = IncidentAgentStack(
         app,
-        "LimitTest",
+        "LogSyncTest",
         stage="test",
         env=cdk.Environment(account="111111111111", region="us-east-1"),
     )
-    functions = Template.from_stack(stack).find_resources("AWS::Lambda::Function")
-    ingest = next(
-        f
-        for f in functions.values()
-        if f["Properties"].get("Handler") == "incident_agent.handlers.ingest.handler"
+    template = Template.from_stack(stack)
+    template.has_resource_properties(
+        "AWS::Logs::SubscriptionFilter", {"LogGroupName": "/app/orders-api"}
     )
-    assert "ReservedConcurrentExecutions" not in ingest["Properties"]
+    statements = _role_statements(template, "incident_agent.handlers.log_sync.handler")
+    writes = [s for s in statements if "s3:PutObject" in s["Action"]]
+    assert writes
+    assert "knowledge/log-*" in str(writes[0]["Resource"])
+
+
+def test_log_sync_rejects_groups_outside_the_allowed_prefix(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    asset = tmp_path_factory.mktemp("lambda-logsync-bad")
+    (asset / "placeholder.txt").write_text("asset")
+    app = cdk.App(context={"lambda_asset_path": str(asset), "log_sync_groups": "/secret/group"})
+    with pytest.raises(ValueError, match="outside the configured log group prefix"):
+        IncidentAgentStack(
+            app,
+            "LogSyncBadTest",
+            stage="test",
+            env=cdk.Environment(account="111111111111", region="us-east-1"),
+        )
 
 
 def test_budget_alert_is_created_only_when_configured(

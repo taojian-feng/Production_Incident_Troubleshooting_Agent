@@ -36,8 +36,8 @@ How each section of the system design is realised in code and on AWS.
 
 | Design | Implementation |
 | --- | --- |
-| 2.1 Ingestion, unified store | `ingestion/` chunking + pipeline; vector matrix and chunk metadata snapshot in S3 (`storage/repositories.py` `S3IndexSnapshot`), incidents in DynamoDB. |
-| 2.1 Real-time sync | S3 `ObjectCreated` on `knowledge/` -> ingest Lambda (reserved concurrency 1 by default) re-indexes and writes a new snapshot, and running functions reload it on their next invocation; `.json` incident exports also upsert the incidents table. |
+| 2.1 Ingestion, unified store | `ingestion/` chunking + pipeline; vector matrix and chunk metadata in one S3 snapshot (`storage/repositories.py` `S3IndexSnapshot`), incidents in DynamoDB. |
+| 2.1 Real-time sync | Uploads to `knowledge/` trigger the ingest Lambda, which updates one S3 snapshot with a conditional write, and the knowledge server reloads it on its next invocation. Jira and ServiceNow webhooks (`POST /tickets/*`) are normalised and written to `knowledge/`, and `.json` incidents also upsert the incidents table. A CloudWatch Logs subscription adds each first-seen error pattern. Live logs are read directly by the logs domain. |
 | 2.2 Hybrid search | `retrieval/keyword.py` (BM25 + exact-id boost), `retrieval/vector.py` (cosine), `retrieval/hybrid.py` (planner + RRF). |
 | 2.3 Domain MCP servers | One Lambda per domain (`handlers/mcp_lambda.py`) serves MCP over an IAM-authenticated Function URL with a role holding only that domain's access. Triage calls them through `tools/mcp_client.py` and holds no direct access to logs, incidents or the index. Locally, tests and the eval harness use the same servers in-process. |
 | 3 Context engineering | `reasoning/context.py` |
@@ -58,11 +58,12 @@ How each section of the system design is realised in code and on AWS.
 | DynamoDB `Incidents` | ticket history, GSI `by_service (service, opened_at)` | on-demand, PITR |
 | DynamoDB `Reports`, `Feedback` | reports; feedback keyed `(report_id, created_at)` | on-demand, PITR |
 | Lambda `Triage` | the agent | Python 3.13 arm64, 1769 MB, 5 min, DLQ, X-Ray |
-| Lambda `Ingest` | index sync | reserved concurrency 1 by default; `-c ingest_reserved_concurrency=0` where the account limit rejects it |
+| Lambda `Ingest` | index sync | conditional S3 writes make concurrent uploads safe |
+| Lambda `LogSync` | first-seen error patterns to knowledge | only with `log_sync_groups` context |
 | Lambda `Api` | analyst API | 29 s |
 | Lambdas `LogsMcp`, `TicketsMcp`, `KnowledgeMcp` | domain MCP servers | Function URLs with IAM auth, 30 s, one role per domain |
 | EventBridge rule | alarm -> triage | prefix-filtered on `ia-` |
-| HTTP API | `/alerts`, `/reports/{id}`, `/reports/{id}/feedback` | IAM authorisation |
+| HTTP API | `/alerts`, `/reports/{id}`, `/reports/{id}/feedback`, `/tickets/jira`, `/tickets/servicenow` | IAM authorisation |
 | SNS topic | on-call notification | TLS-only publish |
 | CloudWatch | dashboard, error and DLQ alarms | metrics from EMF |
 | AWS Budget | account-wide monthly spend alert | only with `budget_email` and `monthly_budget_usd` context |
@@ -77,5 +78,5 @@ prefix; table and bucket-prefix grants scoped to what each function does.
 
 The NumPy index comfortably serves tens of thousands of chunks per Lambda. Beyond that,
 implement the `VectorStore` Protocol on OpenSearch Serverless or S3 Vectors; nothing
-else changes. Ingest serialises snapshot writes with reserved concurrency 1; a higher
-upload rate would move to an SQS-batched ingest.
+else changes. Each ingest rewrites the whole snapshot, and a sustained high upload rate
+would cause repeated write conflicts, so it would move to an SQS-batched ingest.

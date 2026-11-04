@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from incident_agent.retrieval.hybrid import HybridRetriever
 
 
+# Log patterns only record that an error was seen, so they must not displace a runbook's fix.
+LOG_PATTERN_WEIGHT: Final = 0.5
+MAX_LOG_PATTERNS: Final = 1
 _ACTION_SECTIONS: Final = re.compile(r"mitigation|resolution|remediation", re.IGNORECASE)
 
 
@@ -30,6 +33,10 @@ def _evidence(chunk: Chunk, score: float) -> RawEvidence:
         score=score,
         uri=chunk.metadata.get("uri"),
     )
+
+
+def _is_log_pattern(hit: SearchHit) -> bool:
+    return hit.chunk.metadata.get("doc_type") == "log_pattern"
 
 
 @dataclass(slots=True)
@@ -47,8 +54,13 @@ class KnowledgeServer:
     async def gather(self, alert: Alert, plan: RetrievalPlan) -> list[RawEvidence]:
         """Service-scoped hybrid search, falling back to the whole corpus."""
         hits = await self.retriever.search(plan, k=self.top_k, filters={"service": alert.service})
-        evidence = [_evidence(hit.chunk, hit.score) for hit in hits]
-        return [*evidence, *self._action_sections(hits)]
+        documents = [hit for hit in hits if not _is_log_pattern(hit)]
+        patterns = [hit for hit in hits if _is_log_pattern(hit)][:MAX_LOG_PATTERNS]
+        return [
+            *(_evidence(hit.chunk, hit.score) for hit in documents),
+            *self._action_sections(documents),
+            *(_evidence(hit.chunk, hit.score * LOG_PATTERN_WEIGHT) for hit in patterns),
+        ]
 
     def _action_sections(self, hits: Sequence[SearchHit]) -> list[RawEvidence]:
         """Add the fix from the best-matching document.
