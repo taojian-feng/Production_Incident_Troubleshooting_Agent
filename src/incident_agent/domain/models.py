@@ -345,6 +345,29 @@ class TriageReport(FrozenModel):
         return ReportStatus.NEEDS_REVIEW
 
 
+class ReportSummary(FrozenModel):
+    """One row of the Analyst UI's report list."""
+
+    report_id: NonEmptyStr
+    service: NonEmptyStr
+    severity: Severity
+    title: NonEmptyStr
+    status: ReportStatus
+    created_at: AwareDatetime
+
+    @classmethod
+    def of(cls, report: TriageReport) -> ReportSummary:
+        """Summarise a report."""
+        return cls(
+            report_id=report.report_id,
+            service=report.alert.service,
+            severity=report.alert.severity,
+            title=report.alert.title,
+            status=report.status,
+            created_at=report.created_at,
+        )
+
+
 class Feedback(FrozenModel):
     """Analyst thumbs up/down (and optional correction) on a report."""
 

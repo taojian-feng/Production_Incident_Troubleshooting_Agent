@@ -31,6 +31,11 @@ read -rs KEY && aws secretsmanager create-secret --name incident-agent/anthropic
 make deploy STAGE=dev CDK_ARGS="-c anthropic_key_secret=incident-agent/anthropic-api-key"
 ```
 
+## Analyst UI
+
+The `AnalystUiUrl` output is the page. To preview it locally with sample data and no sign-in,
+run `uv run python scripts/ui_preview.py` and open http://localhost:5173.
+
 ## Load knowledge
 
 ```bash
@@ -90,6 +95,7 @@ aws cloudwatch put-metric-alarm --alarm-name ia-payments-api-5xx \
 | `-c log_group_prefix=` | `/app/` | Log groups the triage role may read |
 | `-c log_sync_groups=` | unset | Comma-separated log groups to subscribe, which must already exist. Their first-seen error patterns are indexed |
 | `-c budget_email=` and `-c monthly_budget_usd=` | unset | Email at 80% and 100% of actual AWS spend and 100% of forecast. Covers the whole account, not Anthropic API usage. Set both or no budget is created |
+| `-c ui_admin_email=` | unset | Creates the first analyst account. Cognito emails that address a temporary password. Add others with `aws cognito-idp admin-create-user` |
 | `-c ui_origins=` | `http://localhost:5173` | CORS origins for the analyst UI |
 
 ## Before production: verify

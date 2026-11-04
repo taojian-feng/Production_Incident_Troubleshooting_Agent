@@ -17,6 +17,8 @@ from incident_agent.retrieval.keyword import BM25Index
 from incident_agent.retrieval.vector import InMemoryVectorIndex
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mypy_boto3_dynamodb.service_resource import Table
     from mypy_boto3_s3 import S3Client
 
@@ -40,6 +42,10 @@ class ReportStore(Protocol):
         """Load a report by id."""
         ...
 
+    def recent(self, limit: int) -> list[TriageReport]:
+        """The most recent reports, newest first."""
+        ...
+
 
 class FeedbackStore(Protocol):
     """Feedback persistence seam."""
@@ -51,6 +57,12 @@ class FeedbackStore(Protocol):
     def for_report(self, report_id: str) -> list[Feedback]:
         """All feedback for a report."""
         ...
+
+
+def _report_from_item(item: Mapping[str, object]) -> TriageReport:
+    """Validate a stored report. ``status`` is recomputed, so the stored copy is dropped."""
+    fields = {key: value for key, value in item.items() if key != "status"}
+    return TriageReport.model_validate_json(json.dumps(fields, default=str))
 
 
 @dataclass(slots=True)
@@ -68,8 +80,17 @@ class DynamoReportStore:
         item = self.table.get_item(Key={"report_id": report_id}).get("Item")
         if item is None:
             return None
-        item.pop("status", None)
-        return TriageReport.model_validate_json(json.dumps(item, default=str))
+        return _report_from_item(item)
+
+    def recent(self, limit: int) -> list[TriageReport]:
+        """The most recent reports, newest first. Scans the table, which suits this volume."""
+        response = self.table.scan()
+        items = list(response["Items"])
+        while "LastEvaluatedKey" in response:
+            response = self.table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            items.extend(response["Items"])
+        reports = [_report_from_item(item) for item in items]
+        return sorted(reports, key=lambda r: r.created_at, reverse=True)[:limit]
 
 
 @dataclass(slots=True)
@@ -110,6 +131,10 @@ class InMemoryReportStore:
     def get(self, report_id: str) -> TriageReport | None:
         """Load a report by id."""
         return self.reports.get(report_id)
+
+    def recent(self, limit: int) -> list[TriageReport]:
+        """The most recent reports, newest first."""
+        return sorted(self.reports.values(), key=lambda r: r.created_at, reverse=True)[:limit]
 
 
 @dataclass(slots=True)

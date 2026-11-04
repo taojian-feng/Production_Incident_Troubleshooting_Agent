@@ -5,6 +5,9 @@ Routes (API Gateway HTTP API, payload v2, IAM-authorised):
 * ``POST /alerts``                  submit an alert; triage runs async -> 202 + report id
 * ``GET  /reports/{report_id}``     fetch a report
 * ``POST /reports/{report_id}/feedback``  thumbs up/down + optional correction
+* ``POST /tickets/jira`` and ``/tickets/servicenow``  index a ticket
+
+The Analyst UI uses ``/api/*`` routes, which accept a Cognito sign-in token instead of IAM.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from incident_agent.domain.models import (
     Feedback,
     HistoricalIncident,
     JiraWebhook,
+    ReportSummary,
     ServiceNowIncident,
 )
 
@@ -34,6 +38,8 @@ logger = logging.getLogger()
 
 Response = dict[str, Any]
 
+_REPORT_LIST_SIZE = 100
+
 
 def _json(status: int, body: object) -> Response:
     return {
@@ -41,6 +47,14 @@ def _json(status: int, body: object) -> Response:
         "headers": {"content-type": "application/json"},
         "body": json.dumps(body, default=str),
     }
+
+
+def _caller(event: dict[str, Any]) -> str | None:
+    """Who the API Gateway authorizer verified: a signed-in analyst or an IAM principal."""
+    authorizer = event.get("requestContext", {}).get("authorizer", {})
+    email: str | None = authorizer.get("jwt", {}).get("claims", {}).get("email")
+    principal: str | None = authorizer.get("iam", {}).get("userArn")
+    return email or principal
 
 
 @dataclass(slots=True)
@@ -58,6 +72,9 @@ class Api:
             "POST /alerts": self.submit_alert,
             "GET /reports/{report_id}": self.get_report,
             "POST /reports/{report_id}/feedback": self.post_feedback,
+            "GET /api/reports": self.list_reports,
+            "GET /api/reports/{report_id}": self.get_report_with_feedback,
+            "POST /api/reports/{report_id}/feedback": self.post_feedback,
             "POST /tickets/jira": self.receive_jira,
             "POST /tickets/servicenow": self.receive_servicenow,
         }
@@ -101,13 +118,29 @@ class Api:
             return _json(404, {"error": "report not found (triage may still be running)"})
         return _json(200, report.model_dump(mode="json"))
 
+    def list_reports(self, _event: dict[str, Any]) -> Response:
+        """The Analyst UI's report list."""
+        reports = self.reports.recent(_REPORT_LIST_SIZE)
+        return _json(
+            200, {"reports": [ReportSummary.of(r).model_dump(mode="json") for r in reports]}
+        )
+
+    def get_report_with_feedback(self, event: dict[str, Any]) -> Response:
+        """One report for the Analyst UI, with the feedback already given on it."""
+        report_id = event["pathParameters"]["report_id"]
+        report = self.reports.get(report_id)
+        if report is None:
+            return _json(404, {"error": "report not found"})
+        feedback = [f.model_dump(mode="json") for f in self.feedback.for_report(report_id)]
+        return _json(200, {"report": report.model_dump(mode="json"), "feedback": feedback})
+
     def post_feedback(self, event: dict[str, Any]) -> Response:
         """Store feedback; it feeds the evaluation dataset (continuous improvement)."""
         report_id = event["pathParameters"]["report_id"]
         if self.reports.get(report_id) is None:
             return _json(404, {"error": "report not found"})
         body = json.loads(event.get("body") or "{}")
-        caller = event.get("requestContext", {}).get("authorizer", {}).get("iam", {}).get("userArn")
+        caller = _caller(event)
         feedback = Feedback.model_validate(
             {**body, "report_id": report_id, "user": caller or body.get("user", "anonymous")}
         )
