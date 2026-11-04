@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from incident_agent.domain.enums import ReportStatus, StepKind
+from incident_agent.domain.enums import EvidenceSource, ReportStatus, StepKind
 
 if TYPE_CHECKING:
-    from incident_agent.domain.models import TriageReport, TriageStep
+    from incident_agent.domain.models import Evidence, TriageReport, TriageStep
 
 _SNS_SUBJECT_LIMIT = 100
+_LOG_SNIPPET_CHARS = 160
 _LEADING_NUMBER = re.compile(r"^\s*\d+[.)]\s+")
 _HEADINGS = (
     (StepKind.SUMMARY, "SUMMARY"),
@@ -52,6 +53,14 @@ def _section(heading: str, steps: list[TriageStep], *, numbered: bool) -> list[s
     return lines
 
 
+def _evidence_line(evidence: Evidence) -> str:
+    """Log titles are only counts, so they also show which error was counted."""
+    title = evidence.title.rstrip(" >")
+    if evidence.source is EvidenceSource.LOGS:
+        title = f"{title}: {evidence.snippet[:_LOG_SNIPPET_CHARS]}"
+    return f"{evidence.evidence_id} ({evidence.source}): {title}"
+
+
 def format_report_email(report: TriageReport) -> tuple[str, str]:
     """Return ``(subject, body)``: findings first, then evidence, then run details."""
     alert = report.alert
@@ -66,7 +75,7 @@ def format_report_email(report: TriageReport) -> tuple[str, str]:
             lines += _section(heading, steps, numbered=kind is StepKind.RECOMMENDATION)
     if report.evidence:
         lines.append("EVIDENCE")
-        lines += [f"{e.evidence_id} ({e.source}): {e.title}" for e in report.evidence]
+        lines += [_evidence_line(e) for e in report.evidence]
         lines.append("")
     lines += [
         f"Report: {report.report_id} (GET /reports/{report.report_id} returns the full report)",

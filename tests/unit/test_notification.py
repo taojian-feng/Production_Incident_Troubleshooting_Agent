@@ -82,3 +82,24 @@ def test_subject_is_always_valid_for_sns() -> None:
     assert subject.isascii()
     assert "\n" not in subject
     assert len(subject) < 100
+
+
+def test_log_evidence_shows_the_error_and_titles_lose_trailing_separators() -> None:
+    report = _report(_step(1, StepKind.SUMMARY, "Cache is timing out."))
+    log = Evidence(
+        evidence_id="E2",
+        source=EvidenceSource.LOGS,
+        ref="log:1",
+        title="40x in /app/orders-api",
+        snippet="ERROR ERR_CACHE_TIMEOUT command timed out",
+    )
+    runbook = Evidence(
+        evidence_id="E3",
+        source=EvidenceSource.KNOWLEDGE,
+        ref="runbook#1",
+        title="Runbook: cache timeouts >",
+        snippet="details",
+    )
+    _, body = format_report_email(report.model_copy(update={"evidence": (log, runbook)}))
+    assert "E2 (logs): 40x in /app/orders-api: ERROR ERR_CACHE_TIMEOUT command timed out" in body
+    assert "E3 (knowledge): Runbook: cache timeouts\n" in body
