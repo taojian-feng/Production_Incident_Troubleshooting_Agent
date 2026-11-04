@@ -101,16 +101,51 @@ def test_alarm_rule_targets_triage(template: Template) -> None:
     )
 
 
-def test_api_routes_require_iam(template: Template) -> None:
-    routes = template.find_resources("AWS::ApiGatewayV2::Route")
-    assert {r["Properties"]["RouteKey"] for r in routes.values()} == {
+def test_machine_routes_require_iam_and_ui_routes_require_a_sign_in_token(
+    template: Template,
+) -> None:
+    routes = template.find_resources("AWS::ApiGatewayV2::Route").values()
+    by_auth: dict[str, set[str]] = {}
+    for route in routes:
+        props = route["Properties"]
+        by_auth.setdefault(props["AuthorizationType"], set()).add(props["RouteKey"])
+    assert set(by_auth) == {"AWS_IAM", "JWT"}
+    assert by_auth["AWS_IAM"] == {
         "POST /alerts",
         "GET /reports/{report_id}",
         "POST /reports/{report_id}/feedback",
         "POST /tickets/jira",
         "POST /tickets/servicenow",
     }
-    assert {r["Properties"]["AuthorizationType"] for r in routes.values()} == {"AWS_IAM"}
+    assert by_auth["JWT"] == {
+        "GET /api/reports",
+        "GET /api/reports/{report_id}",
+        "POST /api/reports/{report_id}/feedback",
+    }
+
+
+def test_ui_accounts_are_admin_created_and_the_site_is_private(template: Template) -> None:
+    template.has_resource_properties(
+        "AWS::Cognito::UserPool",
+        {"AdminCreateUserConfig": {"AllowAdminCreateUserOnly": True}},
+    )
+    template.has_resource_properties(
+        "AWS::Cognito::UserPoolClient",
+        {"GenerateSecret": False, "AllowedOAuthFlows": ["code"]},
+    )
+    template.resource_count_is("AWS::Cognito::UserPoolUser", 0)
+    distribution = next(iter(template.find_resources("AWS::CloudFront::Distribution").values()))[
+        "Properties"
+    ]["DistributionConfig"]
+    assert distribution["DefaultRootObject"] == "index.html"
+    api_behavior = distribution["CacheBehaviors"][0]
+    assert api_behavior["PathPattern"] == "/api/*"
+    assert api_behavior["ViewerProtocolPolicy"] == "https-only"
+    policy = next(iter(template.find_resources("AWS::CloudFront::ResponseHeadersPolicy").values()))
+    security = policy["Properties"]["ResponseHeadersPolicyConfig"]["SecurityHeadersConfig"]
+    csp = str(security["ContentSecurityPolicy"]["ContentSecurityPolicy"])
+    assert "default-src 'none'" in csp
+    assert "unsafe-inline" not in csp
 
 
 def test_bedrock_access_is_scoped_to_named_models(template: Template) -> None:

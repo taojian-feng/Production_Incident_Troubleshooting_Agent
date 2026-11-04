@@ -30,7 +30,7 @@ How each section of the system design is realised in code and on AWS.
    cannot finish, the steps are flagged and the report is still delivered.
 8. **Persist and notify.** Report to DynamoDB, EMF metrics to CloudWatch, plain text
    report email to SNS (`handlers/notification.py`).
-   The analyst UI reads `GET /reports/{id}` and posts feedback.
+   The Analyst UI (`ui/`) lists and reads reports through `/api/*` and posts feedback.
 
 ## Design section -> implementation
 
@@ -63,6 +63,7 @@ How each section of the system design is realised in code and on AWS.
 | Lambda `Api` | analyst API | 29 s |
 | Lambdas `LogsMcp`, `TicketsMcp`, `KnowledgeMcp` | domain MCP servers | Function URLs with IAM auth, 30 s, one role per domain |
 | EventBridge rule | alarm -> triage | prefix-filtered on `ia-` |
+| Analyst UI | `ui/` static page on a private S3 bucket behind CloudFront, which also proxies `/api/*`. Cognito hosted sign-in with PKCE, admin-created accounts only | `/api/*` routes need a sign-in token |
 | HTTP API | `/alerts`, `/reports/{id}`, `/reports/{id}/feedback`, `/tickets/jira`, `/tickets/servicenow` | IAM authorisation |
 | SNS topic | on-call notification | TLS-only publish |
 | CloudWatch | dashboard, error and DLQ alarms | metrics from EMF |

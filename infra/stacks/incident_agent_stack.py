@@ -14,6 +14,7 @@ model ARNs it needs.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aws_cdk import (
@@ -26,7 +27,10 @@ from aws_cdk import aws_apigatewayv2 as apigw
 from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
 from aws_cdk import aws_budgets as budgets
+from aws_cdk import aws_cloudfront as cloudfront
+from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_cloudwatch as cloudwatch
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
@@ -36,6 +40,7 @@ from aws_cdk import aws_lambda_event_sources as sources
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_logs_destinations as destinations
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_s3_deployment as s3deploy
 from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sqs as sqs
@@ -45,6 +50,7 @@ if TYPE_CHECKING:
 
     from constructs import Construct
 
+UI_DIR = Path(__file__).resolve().parents[2] / "ui"
 METRICS_NAMESPACE = "IncidentAgent"
 CLAUDE_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5")
 EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0"
@@ -233,10 +239,147 @@ class IncidentAgentStack(Stack):
         http_api = self._add_api(api_fn)
         self._add_observability(stage, triage, dlq)
 
+        self._add_ui(http_api, api_fn, stage)
         CfnOutput(self, "ApiUrl", value=http_api.api_endpoint)
         CfnOutput(self, "KnowledgeBucket", value=bucket.bucket_name)
         CfnOutput(self, "IncidentsTable", value=incidents.table_name)
         CfnOutput(self, "NotificationTopic", value=topic.topic_arn)
+
+    def _add_ui(self, http_api: apigw.HttpApi, api_fn: lambda_.Function, stage: str) -> None:
+        """Analyst UI: sign-in, a private static site, and token-authenticated API routes.
+
+        CloudFront serves the page and the API from one origin, so no CORS is needed.
+        """
+        pool = cognito.UserPool(
+            self,
+            "Analysts",
+            self_sign_up_enabled=False,  # an administrator creates each account
+            sign_in_aliases=cognito.SignInAliases(email=True),
+            mfa=cognito.Mfa.OPTIONAL,
+            mfa_second_factor=cognito.MfaSecondFactor(otp=True, sms=False),
+            removal_policy=RemovalPolicy.RETAIN if stage == "prod" else RemovalPolicy.DESTROY,
+        )
+        domain = pool.add_domain(
+            "SignIn",
+            cognito_domain=cognito.CognitoDomainOptions(
+                domain_prefix=f"incident-agent-{stage}-{self.account}"
+            ),
+        )
+        site = s3.Bucket(
+            self,
+            "UiSite",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+        distribution = self._ui_distribution(site, http_api, domain.base_url())
+        page_url = f"https://{distribution.distribution_domain_name}/"
+        client = pool.add_client(
+            "AnalystUi",
+            generate_secret=False,
+            o_auth=cognito.OAuthSettings(
+                flows=cognito.OAuthFlows(authorization_code_grant=True),
+                scopes=[cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+                callback_urls=[page_url],
+                logout_urls=[page_url],
+            ),
+        )
+        authorizer = authorizers.HttpUserPoolAuthorizer(
+            "AnalystToken", pool, user_pool_clients=[client]
+        )
+        integration = integrations.HttpLambdaIntegration("UiIntegration", api_fn)
+        for method, path in (
+            (apigw.HttpMethod.GET, "/api/reports"),
+            (apigw.HttpMethod.GET, "/api/reports/{report_id}"),
+            (apigw.HttpMethod.POST, "/api/reports/{report_id}/feedback"),
+        ):
+            http_api.add_routes(
+                path=path, methods=[method], integration=integration, authorizer=authorizer
+            )
+        config = self.to_json_string(
+            {
+                "clientId": client.user_pool_client_id,
+                "authDomain": domain.base_url(),
+                "redirectUri": page_url,
+            }
+        )
+        s3deploy.BucketDeployment(
+            self,
+            "UiFiles",
+            destination_bucket=site,
+            distribution=distribution,
+            sources=[
+                s3deploy.Source.asset(str(UI_DIR)),
+                s3deploy.Source.data("config.js", f"window.IA_CONFIG={config};"),
+            ],
+        )
+        admin_email: str | None = self.node.try_get_context("ui_admin_email")
+        if admin_email:
+            # Cognito emails this address a temporary password.
+            cognito.CfnUserPoolUser(
+                self,
+                "FirstAnalyst",
+                user_pool_id=pool.user_pool_id,
+                username=admin_email,
+                desired_delivery_mediums=["EMAIL"],
+                user_attributes=[
+                    cognito.CfnUserPoolUser.AttributeTypeProperty(name="email", value=admin_email),
+                    cognito.CfnUserPoolUser.AttributeTypeProperty(
+                        name="email_verified", value="true"
+                    ),
+                ],
+            )
+        CfnOutput(self, "AnalystUiUrl", value=page_url)
+
+    def _ui_distribution(
+        self, site: s3.Bucket, http_api: apigw.HttpApi, sign_in_url: str
+    ) -> cloudfront.Distribution:
+        headers = cloudfront.ResponseHeadersPolicy(
+            self,
+            "UiHeaders",
+            security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
+                content_security_policy=cloudfront.ResponseHeadersContentSecurityPolicy(
+                    content_security_policy=(
+                        "default-src 'none'; script-src 'self'; style-src 'self'; "
+                        f"connect-src 'self' {sign_in_url}; base-uri 'none'; "
+                        f"form-action 'self'; frame-ancestors 'none'"
+                    ),
+                    override=True,
+                ),
+                content_type_options=cloudfront.ResponseHeadersContentTypeOptions(override=True),
+                frame_options=cloudfront.ResponseHeadersFrameOptions(
+                    frame_option=cloudfront.HeadersFrameOption.DENY, override=True
+                ),
+                referrer_policy=cloudfront.ResponseHeadersReferrerPolicy(
+                    referrer_policy=cloudfront.HeadersReferrerPolicy.NO_REFERRER, override=True
+                ),
+                strict_transport_security=cloudfront.ResponseHeadersStrictTransportSecurity(
+                    access_control_max_age=Duration.days(365), override=True
+                ),
+            ),
+        )
+        return cloudfront.Distribution(
+            self,
+            "UiCdn",
+            default_root_object="index.html",
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=origins.S3BucketOrigin.with_origin_access_control(site),
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                response_headers_policy=headers,
+            ),
+            additional_behaviors={
+                "/api/*": cloudfront.BehaviorOptions(
+                    origin=origins.HttpOrigin(
+                        f"{http_api.api_id}.execute-api.{self.region}.{self.url_suffix}"
+                    ),
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                ),
+            },
+        )
 
     def _add_mcp_server(
         self,

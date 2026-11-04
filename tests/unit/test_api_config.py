@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from incident_agent.app import Components
 from incident_agent.config import Settings
-from incident_agent.domain import Alert, Feedback, ModelTier
+from incident_agent.domain import Alert, Feedback, ModelTier, RetrievalMode, Severity
+from incident_agent.domain.models import TriageReport
 from incident_agent.handlers.api import Api
 from incident_agent.handlers.triage import parse_alert, triage
 from incident_agent.storage.repositories import InMemoryReportStore
@@ -138,3 +140,65 @@ class TestSettings:
     def test_missing_required_names_the_variable(self) -> None:
         with pytest.raises(KeyError, match="IA_KNOWLEDGE_BUCKET"):
             Settings.from_env({})
+
+
+def _saved_report(store: InMemoryReportStore, report_id: str, hour: int) -> None:
+    store.save(
+        TriageReport(
+            report_id=report_id,
+            alert=Alert(service="orders-api", title=f"alert {hour}", severity=Severity.SEV2),
+            retrieval_mode=RetrievalMode.VECTOR,
+            steps=(),
+            evidence=(),
+            created_at=datetime(2026, 11, 4, hour, tzinfo=UTC),
+        )
+    )
+
+
+class TestAnalystUiRoutes:
+    def _api(self) -> tuple[Api, InMemoryReportStore, ListFeedback]:
+        reports, feedback = InMemoryReportStore(), ListFeedback()
+        return Api(reports, feedback, lambda _a, _r: None, lambda _i: None), reports, feedback
+
+    def test_report_list_is_newest_first_with_status(self) -> None:
+        api, reports, _feedback = self._api()
+        _saved_report(reports, "rpt-old", 1)
+        _saved_report(reports, "rpt-new", 9)
+        body = json.loads(api.handle({"routeKey": "GET /api/reports"})["body"])
+        assert [r["report_id"] for r in body["reports"]] == ["rpt-new", "rpt-old"]
+        assert body["reports"][0]["status"] == "needs_review"
+        assert "steps" not in body["reports"][0]
+
+    def test_report_detail_includes_its_feedback(self) -> None:
+        api, reports, feedback = self._api()
+        _saved_report(reports, "rpt-1", 1)
+        feedback.add(Feedback(report_id="rpt-1", rating="up"))
+        response = api.handle(
+            {"routeKey": "GET /api/reports/{report_id}", "pathParameters": {"report_id": "rpt-1"}}
+        )
+        body = json.loads(response["body"])
+        assert body["report"]["report_id"] == "rpt-1"
+        assert [f["rating"] for f in body["feedback"]] == ["up"]
+
+    def test_missing_report_is_a_404(self) -> None:
+        api, _reports, _feedback = self._api()
+        response = api.handle(
+            {"routeKey": "GET /api/reports/{report_id}", "pathParameters": {"report_id": "nope"}}
+        )
+        assert response["statusCode"] == 404
+
+    def test_feedback_is_attributed_to_the_signed_in_user_not_the_request_body(self) -> None:
+        api, reports, feedback = self._api()
+        _saved_report(reports, "rpt-1", 1)
+        response = api.handle(
+            {
+                "routeKey": "POST /api/reports/{report_id}/feedback",
+                "pathParameters": {"report_id": "rpt-1"},
+                "requestContext": {
+                    "authorizer": {"jwt": {"claims": {"email": "analyst@example.com"}}}
+                },
+                "body": json.dumps({"rating": "down", "correction": "x", "user": "someone-else"}),
+            }
+        )
+        assert response["statusCode"] == 201
+        assert feedback.items[0].user == "analyst@example.com"
