@@ -13,6 +13,7 @@ import pytest
 from incident_agent.core.errors import LLMOutputError
 from incident_agent.core.rate_limit import AsyncTokenBucket
 from incident_agent.domain import ModelTier
+from incident_agent.llm.anthropic_api import ClaudeApiProvider, default_api_models
 from incident_agent.llm.base import LLMRequest, Message
 from incident_agent.llm.bedrock import ClaudeBedrockProvider, TitanEmbedder, default_bedrock_models
 
@@ -81,6 +82,26 @@ class TestClaudeBedrockProvider:
         provider = ClaudeBedrockProvider(fake)  # type: ignore[arg-type]
         with pytest.raises(LLMOutputError, match="declined"):
             await provider.complete(default_bedrock_models()[ModelTier.LIGHT], REQUEST)
+
+
+class TestClaudeApiProvider:
+    async def test_sends_first_party_model_id(self) -> None:
+        fake = FakeAnthropic(_Message([_Block("text", '{"ok": 1}')]))
+        provider = ClaudeApiProvider(fake, AsyncTokenBucket(rate=100))  # type: ignore[arg-type]
+        response = await provider.complete(default_api_models()[ModelTier.HEAVY], REQUEST)
+
+        assert fake.messages.kwargs["model"] == "claude-opus-5-5"
+        assert fake.messages.kwargs["output_config"]["effort"] == "high"
+        assert response.text == '{"ok": 1}'
+
+    def test_overrides_replace_one_tier(self) -> None:
+        models = default_api_models({ModelTier.LIGHT: "claude-haiku-4-5"})
+        assert models[ModelTier.LIGHT].model_id == "claude-haiku-4-5"
+        assert models[ModelTier.STANDARD].model_id == "claude-sonnet-5-5"
+
+    def test_from_api_key_disables_sdk_retries(self) -> None:
+        provider = ClaudeApiProvider.from_api_key("test-key", requests_per_second=5.0)
+        assert provider._client.max_retries == 0
 
 
 class FakeBedrockRuntime:

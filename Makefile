@@ -37,7 +37,7 @@ synth: package      ## Synthesise CloudFormation
 	cd infra && npx --yes aws-cdk@2 synth
 
 deploy: package     ## Deploy to the account in your AWS profile (STAGE=dev|prod)
-	cd infra && npx --yes aws-cdk@2 deploy -c env=$${STAGE:-dev}
+	cd infra && npx --yes aws-cdk@2 deploy -c env=$${STAGE:-dev} $(CDK_ARGS)
 
 demo:               ## Run the agent offline on the sample data
 	$(PY) incident-agent triage --service payments-api --severity SEV1 \

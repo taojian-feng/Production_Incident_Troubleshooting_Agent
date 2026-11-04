@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     import numpy.typing as npt
-    from anthropic import AsyncAnthropicBedrockMantle
+    from anthropic import AsyncAnthropic, AsyncAnthropicBedrockMantle
     from anthropic.types import MessageParam, OutputConfigParam
     from mypy_boto3_bedrock_runtime import BedrockRuntimeClient
 
@@ -77,7 +77,7 @@ class ClaudeBedrockProvider:
 
     def __init__(
         self,
-        client: AsyncAnthropicBedrockMantle,
+        client: AsyncAnthropicBedrockMantle | AsyncAnthropic,
         limiter: AsyncTokenBucket | None = None,
     ) -> None:
         self._client = client

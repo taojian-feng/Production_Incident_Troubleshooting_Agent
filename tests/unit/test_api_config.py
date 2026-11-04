@@ -105,6 +105,17 @@ class TestApi:
 
 
 class TestSettings:
+    def test_key_secret_selects_claude_api_and_defaults_to_none(self) -> None:
+        required = {
+            "IA_KNOWLEDGE_BUCKET": "b",
+            "IA_INCIDENTS_TABLE": "i",
+            "IA_REPORTS_TABLE": "r",
+            "IA_FEEDBACK_TABLE": "f",
+        }
+        assert Settings.from_env(required).anthropic_key_secret is None
+        env = {**required, "IA_ANTHROPIC_KEY_SECRET": "incident-agent/key"}
+        assert Settings.from_env(env).anthropic_key_secret == env["IA_ANTHROPIC_KEY_SECRET"]
+
     def test_from_env(self) -> None:
         env = {
             "IA_KNOWLEDGE_BUCKET": "b",
