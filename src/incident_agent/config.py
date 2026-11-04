@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from incident_agent.domain.enums import ModelTier
+from incident_agent.domain.enums import EvidenceSource, ModelTier
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -34,6 +34,7 @@ class Settings:
     max_usd_per_run: float = 0.75
     log_group_prefix: str = "/app/"
     anthropic_key_secret: str | None = None
+    mcp_urls: Mapping[EvidenceSource, str] | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -43,6 +44,11 @@ class Settings:
             tier: env[f"IA_MODEL_{tier.name}"]
             for tier in ModelTier
             if env.get(f"IA_MODEL_{tier.name}")
+        }
+        mcp_urls = {
+            domain: env[f"IA_MCP_{domain.name}_URL"]
+            for domain in EvidenceSource
+            if env.get(f"IA_MCP_{domain.name}_URL")
         }
         return cls(
             region=env.get("AWS_REGION", "us-east-1"),
@@ -58,4 +64,5 @@ class Settings:
             max_usd_per_run=float(env.get("IA_MAX_USD_PER_RUN", "0.75")),
             log_group_prefix=env.get("IA_LOG_GROUP_PREFIX", "/app/"),
             anthropic_key_secret=env.get("IA_ANTHROPIC_KEY_SECRET") or None,
+            mcp_urls=mcp_urls or None,
         )

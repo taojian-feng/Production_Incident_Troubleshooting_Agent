@@ -33,7 +33,6 @@ def test_cli_benchmark(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 async def test_mcp_server_exposes_domain_tool(local: Components) -> None:
-    pytest.importorskip("mcp")
     from incident_agent.tools.mcp_server import build_mcp_server
 
     server = build_mcp_server(local.servers[EvidenceSource.TICKETS])

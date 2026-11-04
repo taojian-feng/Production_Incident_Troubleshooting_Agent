@@ -163,6 +163,23 @@ class Evidence(FrozenModel):
     uri: str | None = None
 
 
+class McpEvidence(FrozenModel):
+    """One evidence item returned by a domain's MCP server."""
+
+    source: EvidenceSource
+    ref: NonEmptyStr
+    title: str
+    snippet: str
+    score: float = 0.0
+    uri: str | None = None
+
+
+class McpEvidenceBatch(FrozenModel):
+    """What a domain's search tool returns."""
+
+    items: tuple[McpEvidence, ...]
+
+
 class LLMTriageStep(FrozenModel):
     """Shape the reasoning model must return (used as its JSON schema)."""
 

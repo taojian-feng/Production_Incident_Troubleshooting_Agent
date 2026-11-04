@@ -10,11 +10,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import boto3
+import httpx2
+
 from incident_agent.domain.enums import EvidenceSource
 from incident_agent.evaluation.harness import log_events
 from incident_agent.ingestion.loaders import iter_markdown_dir, load_incidents
 from incident_agent.ingestion.log_stream import read_jsonl
 from incident_agent.ingestion.pipeline import IngestionPipeline
+from incident_agent.llm.anthropic_api import ClaudeApiProvider, default_api_models
+from incident_agent.llm.bedrock import (
+    ClaudeBedrockProvider,
+    TitanEmbedder,
+    default_bedrock_models,
+)
 from incident_agent.llm.local import HashingEmbedder, ScriptedLLM
 from incident_agent.llm.router import ModelRouter
 from incident_agent.orchestration.agent import TriageAgent
@@ -23,15 +32,19 @@ from incident_agent.reasoning.grounding import GroundingChecker
 from incident_agent.retrieval.hybrid import HybridRetriever
 from incident_agent.retrieval.keyword import BM25Index
 from incident_agent.retrieval.vector import InMemoryVectorIndex
+from incident_agent.storage.repositories import S3IndexSnapshot
 from incident_agent.tools.base import ToolRegistry
 from incident_agent.tools.knowledge import KnowledgeServer
-from incident_agent.tools.logs import StaticLogsServer
-from incident_agent.tools.tickets import IncidentHistoryServer, InMemoryIncidentRepository
+from incident_agent.tools.logs import CloudWatchLogsServer, StaticLogsServer
+from incident_agent.tools.mcp_client import MCP_TIMEOUT_SECONDS, LambdaUrlAuth, McpToolServer
+from incident_agent.tools.tickets import (
+    DynamoIncidentRepository,
+    IncidentHistoryServer,
+    InMemoryIncidentRepository,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-    import boto3
 
     from incident_agent.config import Settings
     from incident_agent.evaluation.harness import EvalCase
@@ -47,13 +60,36 @@ GROUNDING_CASES = DATA / "eval" / "grounding_cases.json"
 
 
 @dataclass(frozen=True, slots=True)
-class Components:
-    """The wired object graph."""
+class Runtime:
+    """What a triage run needs: the agent and the registry holding its tool metrics."""
 
     agent: TriageAgent
+    registry: ToolRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class Components(Runtime):
+    """The full in-process object graph, used locally and by tests."""
+
     pipeline: IngestionPipeline
     servers: Mapping[EvidenceSource, ToolServer]
-    registry: ToolRegistry
+
+
+def _runtime(
+    llm: LLMProvider,
+    router: ModelRouter,
+    servers: Mapping[EvidenceSource, ToolServer],
+    max_usd_per_run: float,
+) -> Runtime:
+    registry = ToolRegistry(servers=servers)
+    agent = TriageAgent(
+        tools=registry,
+        reasoner=ReasoningEngine(
+            llm=llm, router=router, grounding=GroundingChecker(llm=llm, router=router)
+        ),
+        max_usd_per_run=max_usd_per_run,
+    )
+    return Runtime(agent=agent, registry=registry)
 
 
 def _assemble(
@@ -72,24 +108,17 @@ def _assemble(
         EvidenceSource.TICKETS: tickets,
         EvidenceSource.KNOWLEDGE: KnowledgeServer(retriever),
     }
-    registry = ToolRegistry(servers=servers)
-    agent = TriageAgent(
-        tools=registry,
-        reasoner=ReasoningEngine(
-            llm=llm, router=router, grounding=GroundingChecker(llm=llm, router=router)
-        ),
-        max_usd_per_run=max_usd_per_run,
-    )
+    runtime = _runtime(llm, router, servers, max_usd_per_run)
     pipeline = IngestionPipeline(embedder=embedder, keyword=keyword, vector=vector)
-    return Components(agent=agent, pipeline=pipeline, servers=servers, registry=registry)
+    return Components(
+        agent=runtime.agent, registry=runtime.registry, pipeline=pipeline, servers=servers
+    )
 
 
 async def build_local_components(
     samples: Path = SAMPLES, llm: LLMProvider | None = None
 ) -> Components:
     """Offline stack over ``data/samples`` with deterministic providers."""
-    from incident_agent.llm.bedrock import default_bedrock_models  # noqa: PLC0415
-
     embedder = HashingEmbedder(dim=256)
     incidents = load_incidents(samples / "incidents.json")
     components = _assemble(
@@ -135,15 +164,6 @@ def _claude_backend(  # pragma: no cover - needs AWS
     settings: Settings, session: boto3.Session
 ) -> tuple[LLMProvider, ModelRouter]:
     """Claude API when a key secret is configured, otherwise Claude on Bedrock."""
-    from incident_agent.llm.anthropic_api import (  # noqa: PLC0415
-        ClaudeApiProvider,
-        default_api_models,
-    )
-    from incident_agent.llm.bedrock import (  # noqa: PLC0415
-        ClaudeBedrockProvider,
-        default_bedrock_models,
-    )
-
     if settings.anthropic_key_secret:
         secret = session.client("secretsmanager").get_secret_value(
             SecretId=settings.anthropic_key_secret
@@ -158,16 +178,9 @@ def _claude_backend(  # pragma: no cover - needs AWS
     )
 
 
-def build_aws_components(settings: Settings) -> Components:  # pragma: no cover - needs AWS
-    """Production stack: Bedrock, CloudWatch Logs, DynamoDB, S3 index snapshot."""
-    import boto3  # noqa: PLC0415
-
-    from incident_agent.llm.bedrock import TitanEmbedder  # noqa: PLC0415
-    from incident_agent.storage.repositories import S3IndexSnapshot  # noqa: PLC0415
-    from incident_agent.tools.logs import CloudWatchLogsServer  # noqa: PLC0415
-    from incident_agent.tools.tickets import DynamoIncidentRepository  # noqa: PLC0415
-
-    session = boto3.Session(region_name=settings.region)
+def _aws_index(  # pragma: no cover - needs AWS
+    settings: Settings, session: boto3.Session
+) -> tuple[TitanEmbedder, BM25Index, InMemoryVectorIndex]:
     embedder = TitanEmbedder(
         session.client("bedrock-runtime"),
         model_id=settings.embedding_model_id,
@@ -176,19 +189,47 @@ def build_aws_components(settings: Settings) -> Components:  # pragma: no cover 
     vector, keyword = S3IndexSnapshot(session.client("s3"), settings.knowledge_bucket).load(
         settings.embedding_dim
     )
-    prefix = settings.log_group_prefix
-    llm, router = _claude_backend(settings, session)
-    return _assemble(
-        llm=llm,
-        embedder=embedder,
-        router=router,
-        keyword=keyword,
-        vector=vector,
-        logs=CloudWatchLogsServer(
+    return embedder, keyword, vector
+
+
+def build_domain_server(  # pragma: no cover - needs AWS
+    domain: EvidenceSource, settings: Settings
+) -> ToolServer:
+    """The server behind one domain's MCP Lambda, holding only that domain's clients."""
+    session = boto3.Session(region_name=settings.region)
+    if domain is EvidenceSource.LOGS:
+        prefix = settings.log_group_prefix
+        return CloudWatchLogsServer(
             session.client("logs"), default_log_group_for=lambda svc: f"{prefix}{svc}"
-        ),
-        tickets=IncidentHistoryServer(
-            DynamoIncidentRepository(session.resource("dynamodb").Table(settings.incidents_table))
-        ),
-        max_usd_per_run=settings.max_usd_per_run,
-    )
+        )
+    if domain is EvidenceSource.TICKETS:
+        table = session.resource("dynamodb").Table(settings.incidents_table)
+        return IncidentHistoryServer(DynamoIncidentRepository(table))
+    embedder, keyword, vector = _aws_index(settings, session)
+    return KnowledgeServer(HybridRetriever(keyword=keyword, vector=vector, embedder=embedder))
+
+
+def build_ingest_pipeline(settings: Settings) -> IngestionPipeline:  # pragma: no cover - needs AWS
+    """The ingest function's pipeline over the current index snapshot."""
+    embedder, keyword, vector = _aws_index(settings, boto3.Session(region_name=settings.region))
+    return IngestionPipeline(embedder=embedder, keyword=keyword, vector=vector)
+
+
+def build_aws_components(settings: Settings) -> Runtime:  # pragma: no cover - needs AWS
+    """Production triage: Claude plus the three domains reached over MCP."""
+    if not settings.mcp_urls:
+        msg = "IA_MCP_LOGS_URL, IA_MCP_TICKETS_URL and IA_MCP_KNOWLEDGE_URL must be set"
+        raise KeyError(msg)
+    session = boto3.Session(region_name=settings.region)
+    llm, router = _claude_backend(settings, session)
+    servers: dict[EvidenceSource, ToolServer] = {
+        domain: McpToolServer(
+            domain=domain,
+            url=url,
+            client_factory=lambda: httpx2.AsyncClient(
+                auth=LambdaUrlAuth(settings.region), timeout=MCP_TIMEOUT_SECONDS
+            ),
+        )
+        for domain, url in settings.mcp_urls.items()
+    }
+    return _runtime(llm, router, servers, settings.max_usd_per_run)

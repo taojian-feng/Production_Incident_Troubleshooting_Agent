@@ -20,7 +20,7 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Template:
     return Template.from_stack(stack)
 
 
-def test_three_python_lambdas_on_arm(template: Template) -> None:
+def test_python_lambdas_on_arm(template: Template) -> None:
     functions = template.find_resources("AWS::Lambda::Function")
     ours = {
         f["Properties"]["Handler"]
@@ -31,6 +31,7 @@ def test_three_python_lambdas_on_arm(template: Template) -> None:
         "incident_agent.handlers.triage.handler",
         "incident_agent.handlers.ingest.handler",
         "incident_agent.handlers.api.handler",
+        "incident_agent.handlers.mcp_lambda.handler",
     }
     template.has_resource_properties(
         "AWS::Lambda::Function",
@@ -125,9 +126,12 @@ def test_bedrock_access_is_scoped_to_named_models(template: Template) -> None:
     ]
     assert statements, "no Bedrock statement found"
     for statement in statements:
-        resources = statement["Resource"]
-        assert "*" not in resources
-        assert any("claude-opus-5-5" in str(r) for r in resources)
+        assert "*" not in statement["Resource"]
+    resources = [str(statement["Resource"]) for statement in statements]
+    assert any("claude-opus-5-5" in r for r in resources)
+    embedding_only = [r for r in resources if "titan-embed-text-v2" in r]
+    assert embedding_only
+    assert not any("claude" in r for r in embedding_only)
 
 
 def test_claude_mantle_endpoint_is_authorised_on_projects_only(template: Template) -> None:
@@ -144,7 +148,7 @@ def test_claude_mantle_endpoint_is_authorised_on_projects_only(template: Templat
         assert ":project/*" in str(statement["Resource"])
 
 
-def test_key_secret_grants_both_functions_read_and_skips_mantle(
+def test_key_secret_is_readable_by_triage_only_and_skips_mantle(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     asset = tmp_path_factory.mktemp("lambda-key")
@@ -174,7 +178,7 @@ def test_key_secret_grants_both_functions_read_and_skips_mantle(
         for s in p["Properties"]["PolicyDocument"]["Statement"]
     ]
     secret_reads = [s for s in statements if "secretsmanager:GetSecretValue" in s["Action"]]
-    assert len(secret_reads) == 2
+    assert len(secret_reads) == 1
     assert all("incident-agent/key" in str(s["Resource"]) for s in secret_reads)
     assert not [s for s in statements if s["Action"] == "bedrock-mantle:CreateInference"]
 
@@ -233,3 +237,82 @@ def test_budget_alert_is_created_only_when_configured(
     assert alerts[0]["Subscribers"] == [
         {"SubscriptionType": "EMAIL", "Address": "oncall@example.com"}
     ]
+
+
+def _role_statements(template: Template, handler: str, domain: str | None = None) -> list[dict]:  # type: ignore[type-arg]
+    """IAM statements attached to the role of the function with this handler and domain."""
+    functions = template.find_resources("AWS::Lambda::Function")
+    match = next(
+        f
+        for f in functions.values()
+        if f["Properties"].get("Handler") == handler
+        and (
+            domain is None
+            or f["Properties"]["Environment"]["Variables"].get("IA_MCP_DOMAIN") == domain
+        )
+    )
+    role = match["Properties"]["Role"]["Fn::GetAtt"][0]
+    return [
+        statement
+        for policy in template.find_resources("AWS::IAM::Policy").values()
+        if {"Ref": role} in policy["Properties"]["Roles"]
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+    ]
+
+
+def _actions(statements: list[dict]) -> set[str]:  # type: ignore[type-arg]
+    return {
+        action
+        for statement in statements
+        for action in (
+            statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
+        )
+    }
+
+
+MCP_HANDLER = "incident_agent.handlers.mcp_lambda.handler"
+
+
+def test_each_mcp_server_can_reach_only_its_own_domain(template: Template) -> None:
+    logs = _actions(_role_statements(template, MCP_HANDLER, "logs"))
+    tickets = _actions(_role_statements(template, MCP_HANDLER, "tickets"))
+    knowledge = _actions(_role_statements(template, MCP_HANDLER, "knowledge"))
+
+    assert "logs:FilterLogEvents" in logs
+    assert not any(a.startswith(("dynamodb:", "s3:", "bedrock:")) for a in logs)
+
+    assert "dynamodb:GetItem" in tickets
+    assert not any(a.startswith(("logs:Filter", "s3:", "bedrock:")) for a in tickets)
+    assert not any(a in tickets for a in ("dynamodb:PutItem", "dynamodb:DeleteItem"))
+
+    assert "bedrock:InvokeModel" in knowledge
+    assert "s3:GetObject*" in knowledge
+    assert not any(a.startswith(("dynamodb:", "logs:Filter")) for a in knowledge)
+    assert "s3:PutObject" not in knowledge
+
+
+def test_triage_reaches_evidence_only_through_mcp(template: Template) -> None:
+    triage = _actions(_role_statements(template, "incident_agent.handlers.triage.handler"))
+    assert {"lambda:InvokeFunctionUrl", "lambda:InvokeFunction"} <= triage
+    assert "logs:FilterLogEvents" not in triage
+    assert not any(a.startswith("s3:") for a in triage)
+    assert "dynamodb:GetItem" not in triage
+
+
+def test_mcp_function_urls_require_iam(template: Template) -> None:
+    urls = template.find_resources("AWS::Lambda::Url").values()
+    assert len(urls) == 3
+    assert {u["Properties"]["AuthType"] for u in urls} == {"AWS_IAM"}
+
+
+def test_triage_is_given_the_mcp_path_on_each_function_url(template: Template) -> None:
+    functions = template.find_resources("AWS::Lambda::Function").values()
+    triage = next(
+        f
+        for f in functions
+        if f["Properties"].get("Handler") == "incident_agent.handlers.triage.handler"
+    )
+    variables = triage["Properties"]["Environment"]["Variables"]
+    for name in ("IA_MCP_LOGS_URL", "IA_MCP_TICKETS_URL", "IA_MCP_KNOWLEDGE_URL"):
+        parts = variables[name]["Fn::Join"][1]
+        assert parts[-1] == "mcp", name

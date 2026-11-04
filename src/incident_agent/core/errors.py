@@ -37,6 +37,10 @@ class ToolAccessDeniedError(IncidentAgentError):
     """An agent role tried to call a tool domain it is not granted."""
 
 
+class ToolCallError(IncidentAgentError):
+    """A remote tool server could not be reached or reported a failure."""
+
+
 class BudgetExceededError(IncidentAgentError):
     """A triage run exceeded its token/cost budget (FinOps guardrail)."""
 

@@ -40,6 +40,8 @@ from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sqs as sqs
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from constructs import Construct
 
 METRICS_NAMESPACE = "IncidentAgent"
@@ -175,20 +177,26 @@ class IncidentAgentStack(Stack):
         )
         api_fn.add_environment("IA_TRIAGE_FUNCTION", triage.function_name)
 
+        # ------------------------------------------------------------------ MCP servers
+        # One function per domain, each with a role holding only that domain's access.
+        logs_mcp = self._add_mcp_server(function, triage, "Logs", "logs", 512)
+        tickets_mcp = self._add_mcp_server(function, triage, "Tickets", "tickets", 512)
+        knowledge_mcp = self._add_mcp_server(function, triage, "Knowledge", "knowledge", 1024)
+
         # ------------------------------------------------------------------ permissions
-        self._allow_models(triage, ingest, key_secret)
+        self._allow_models(triage, (ingest, knowledge_mcp), key_secret)
         self._add_budget_alert(stage)
-        for fn in (triage, ingest):
-            bucket.grant_read_write(fn, "index/*")
+        bucket.grant_read_write(ingest, "index/*")
+        bucket.grant_read(knowledge_mcp, "index/*")
         bucket.grant_read(ingest, "knowledge/*")
-        incidents.grant_read_data(triage)
+        incidents.grant_read_data(tickets_mcp)
         incidents.grant_read_write_data(ingest)
         reports.grant_write_data(triage)
         reports.grant_read_data(api_fn)
         feedback.grant_read_write_data(api_fn)
         topic.grant_publish(triage)
         triage.grant_invoke(api_fn)
-        triage.add_to_role_policy(
+        logs_mcp.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["logs:FilterLogEvents"],
                 resources=[
@@ -221,6 +229,39 @@ class IncidentAgentStack(Stack):
             )
         )
 
+        http_api = self._add_api(api_fn)
+        self._add_observability(stage, triage, dlq)
+
+        CfnOutput(self, "ApiUrl", value=http_api.api_endpoint)
+        CfnOutput(self, "KnowledgeBucket", value=bucket.bucket_name)
+        CfnOutput(self, "IncidentsTable", value=incidents.table_name)
+        CfnOutput(self, "NotificationTopic", value=topic.topic_arn)
+
+    def _add_mcp_server(
+        self,
+        function: Callable[..., lambda_.Function],
+        triage: lambda_.Function,
+        name: str,
+        domain: str,
+        memory: int,
+    ) -> lambda_.Function:
+        server = function(
+            f"{name}Mcp",
+            "incident_agent.handlers.mcp_lambda.handler",
+            timeout=Duration.seconds(30),
+            memory=memory,
+        )
+        server.add_environment("IA_MCP_DOMAIN", domain)
+        url = server.add_function_url(auth_type=lambda_.FunctionUrlAuthType.AWS_IAM)
+        # Function URLs need both permissions.
+        url.grant_invoke_url(triage)
+        server.grant_invoke(triage)
+        endpoint = f"{url.url}mcp"  # the SDK serves MCP at /mcp; url.url ends with a slash
+        triage.add_environment(f"IA_MCP_{domain.upper()}_URL", endpoint)
+        CfnOutput(self, f"{name}McpUrl", value=endpoint)
+        return server
+
+    def _add_api(self, api_fn: lambda_.Function) -> apigw.HttpApi:
         http_api = apigw.HttpApi(
             self,
             "AnalystApi",
@@ -243,8 +284,9 @@ class IncidentAgentStack(Stack):
             (apigw.HttpMethod.POST, "/reports/{report_id}/feedback"),
         ):
             http_api.add_routes(path=path, methods=[method], integration=integration)
+        return http_api
 
-        # ------------------------------------------------------------------ observability
+    def _add_observability(self, stage: str, triage: lambda_.Function, dlq: sqs.Queue) -> None:
         def search(metric: str, stat: str, label: str) -> cloudwatch.MathExpression:
             return cloudwatch.MathExpression(
                 expression=(
@@ -299,11 +341,6 @@ class IncidentAgentStack(Stack):
             alarm_description="Alerts failed triage and landed in the DLQ.",
         )
 
-        CfnOutput(self, "ApiUrl", value=http_api.api_endpoint)
-        CfnOutput(self, "KnowledgeBucket", value=bucket.bucket_name)
-        CfnOutput(self, "IncidentsTable", value=incidents.table_name)
-        CfnOutput(self, "NotificationTopic", value=topic.topic_arn)
-
     def _ingest_reservation(self) -> int | None:
         """Default 1. New accounts have a Lambda limit of 10, which rejects any reservation."""
         configured = self.node.try_get_context("ingest_reserved_concurrency")
@@ -345,28 +382,35 @@ class IncidentAgentStack(Stack):
         )
 
     def _allow_models(
-        self, triage: lambda_.Function, ingest: lambda_.Function, key_secret: str | None
+        self,
+        triage: lambda_.Function,
+        embedding_users: tuple[lambda_.Function, ...],
+        key_secret: str | None,
     ) -> None:
-        """Grant model access: both functions build the Claude client, only triage calls it."""
-        model_arns = [
-            *(
-                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.{m}"
-                for m in CLAUDE_MODELS
-            ),
-            f"arn:aws:bedrock:{self.region}::foundation-model/{EMBEDDING_MODEL}",
-            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
-        ]
-        invoke = iam.PolicyStatement(
-            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-            resources=model_arns,
+        """Embeddings for functions that search or index; Claude for triage only."""
+        embeddings = iam.PolicyStatement(
+            actions=["bedrock:InvokeModel"],
+            resources=[f"arn:aws:bedrock:{self.region}::foundation-model/{EMBEDDING_MODEL}"],
         )
-        triage.add_to_role_policy(invoke)
-        ingest.add_to_role_policy(invoke)
+        for fn in embedding_users:
+            fn.add_to_role_policy(embeddings)
         if key_secret:
-            secret = secretsmanager.Secret.from_secret_name_v2(self, "ClaudeApiKey", key_secret)
-            secret.grant_read(triage)
-            secret.grant_read(ingest)
+            secretsmanager.Secret.from_secret_name_v2(self, "ClaudeApiKey", key_secret).grant_read(
+                triage
+            )
             return
+        triage.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=[
+                    *(
+                        f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.{m}"
+                        for m in CLAUDE_MODELS
+                    ),
+                    f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                ],
+            )
+        )
         # The Mantle (Messages API) endpoint authorises its own action on Bedrock projects.
         triage.add_to_role_policy(
             iam.PolicyStatement(

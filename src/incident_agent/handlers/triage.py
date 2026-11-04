@@ -1,8 +1,7 @@
 """Lambda: EventBridge (CloudWatch alarm -> ALARM) or async API invoke -> triage report.
 
-Heavy objects (clients, the loaded index) are reused across warm invocations.
-Components are rebuilt when the S3 index snapshot changes, so new knowledge is
-used without waiting for a cold start.
+Clients are reused across warm invocations. Evidence comes from the three domain
+MCP servers, which each hold their own permissions and data.
 """
 
 from __future__ import annotations
@@ -14,15 +13,15 @@ from typing import TYPE_CHECKING, Any
 
 import boto3
 
-from incident_agent.app import Components, build_aws_components
+from incident_agent.app import build_aws_components
 from incident_agent.config import Settings
-from incident_agent.core.refresh import RefreshingValue
 from incident_agent.domain.models import Alert, TriageReport
 from incident_agent.handlers.notification import format_report_email
 from incident_agent.observability.metrics import MetricsLogger, record_triage
-from incident_agent.storage.repositories import DynamoReportStore, S3IndexSnapshot
+from incident_agent.storage.repositories import DynamoReportStore
 
 if TYPE_CHECKING:
+    from incident_agent.app import Runtime
     from incident_agent.storage.repositories import ReportStore
 
 logger = logging.getLogger()
@@ -35,17 +34,8 @@ def _settings() -> Settings:
 
 
 @functools.cache
-def _refreshing_components() -> RefreshingValue[Components]:  # pragma: no cover - needs AWS
-    settings = _settings()
-    client = boto3.client("s3", region_name=settings.region)
-    return RefreshingValue(
-        version=S3IndexSnapshot(client, settings.knowledge_bucket).version,
-        build=lambda: build_aws_components(settings),
-    )
-
-
-def _components() -> Components:  # pragma: no cover - exercised in AWS
-    return _refreshing_components().get()
+def _components() -> Runtime:  # pragma: no cover - exercised in AWS
+    return build_aws_components(_settings())
 
 
 @functools.cache
@@ -64,7 +54,7 @@ def parse_alert(event: dict[str, Any]) -> Alert:
 
 
 async def triage(
-    alert: Alert, components: Components, store: ReportStore, report_id: str | None = None
+    alert: Alert, components: Runtime, store: ReportStore, report_id: str | None = None
 ) -> TriageReport:
     """Run the agent, persist the report, emit metrics."""
     report, _state = await components.agent.run(alert)
