@@ -23,7 +23,8 @@ How each section of the system design is realised in code and on AWS.
 6. **Validate** (`reasoning/citations.py`). Plain code checks every step cites known
    evidence and that every ticket id / error code it mentions appears in what it cites.
    Missing steps are added as unverified. Any unverified step -> `needs_review`.
-7. **Persist and notify.** Report to DynamoDB, EMF metrics to CloudWatch, summary to SNS.
+7. **Persist and notify.** Report to DynamoDB, EMF metrics to CloudWatch, plain text
+   report email to SNS (`handlers/notification.py`).
    The analyst UI reads `GET /reports/{id}` and posts feedback.
 
 ## Design section -> implementation
@@ -58,6 +59,7 @@ How each section of the system design is realised in code and on AWS.
 | HTTP API | `/alerts`, `/reports/{id}`, `/reports/{id}/feedback` | IAM authorisation |
 | SNS topic | on-call notification | TLS-only publish |
 | CloudWatch | dashboard, error and DLQ alarms | metrics from EMF |
+| AWS Budget | account-wide monthly spend alert | only with `budget_email` and `monthly_budget_usd` context |
 
 IAM is per function: Bedrock `InvokeModel` only on the three named Claude models, Titan
 v2 and inference profiles; `logs:FilterLogEvents` only under the configured log-group

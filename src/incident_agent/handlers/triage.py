@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +18,7 @@ from incident_agent.app import Components, build_aws_components
 from incident_agent.config import Settings
 from incident_agent.core.refresh import RefreshingValue
 from incident_agent.domain.models import Alert, TriageReport
+from incident_agent.handlers.notification import format_report_email
 from incident_agent.observability.metrics import MetricsLogger, record_triage
 from incident_agent.storage.repositories import DynamoReportStore, S3IndexSnapshot
 
@@ -79,13 +79,9 @@ def _notify(report: TriageReport) -> None:  # pragma: no cover - exercised in AW
     topic = _settings().notify_topic_arn
     if not topic:
         return
-    first = report.steps[0].content if report.steps else ""
+    subject, body = format_report_email(report)
     boto3.client("sns", region_name=_settings().region).publish(
-        TopicArn=topic,
-        Subject=f"[{report.alert.severity}] triage ready: {report.alert.title}"[:100],
-        Message=json.dumps(
-            {"report_id": report.report_id, "status": report.status, "summary": first}
-        ),
+        TopicArn=topic, Subject=subject, Message=body
     )
 
 
