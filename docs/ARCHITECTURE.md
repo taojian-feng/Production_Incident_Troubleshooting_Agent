@@ -39,7 +39,7 @@ How each section of the system design is realised in code and on AWS.
 | 2.1 Ingestion, unified store | `ingestion/` chunking + pipeline; vector matrix and chunk metadata snapshot in S3 (`storage/repositories.py` `S3IndexSnapshot`), incidents in DynamoDB. |
 | 2.1 Real-time sync | S3 `ObjectCreated` on `knowledge/` -> ingest Lambda (reserved concurrency 1 by default) re-indexes and writes a new snapshot, and running functions reload it on their next invocation; `.json` incident exports also upsert the incidents table. |
 | 2.2 Hybrid search | `retrieval/keyword.py` (BM25 + exact-id boost), `retrieval/vector.py` (cosine), `retrieval/hybrid.py` (planner + RRF). |
-| 2.3 Domain MCP servers | `tools/` one server per domain behind a `ToolServer` Protocol and an access policy; `tools/mcp_server.py` exposes each one as its own MCP server for external clients. In Lambda they are called in-process to avoid a per-request subprocess. |
+| 2.3 Domain MCP servers | One Lambda per domain (`handlers/mcp_lambda.py`) serves MCP over an IAM-authenticated Function URL with a role holding only that domain's access. Triage calls them through `tools/mcp_client.py` and holds no direct access to logs, incidents or the index. Locally, tests and the eval harness use the same servers in-process. |
 | 3 Context engineering | `reasoning/context.py` |
 | 3 Enforced citation validation | `reasoning/citations.py` for citations and identifiers, then `reasoning/grounding.py` for whether the sources support each claim. |
 | 3 Structured step-by-step reasoning | `StepKind` order SUMMARY -> PRECEDENT -> RECOMMENDATION, JSON-schema output, `TriageStep` numbering. |
@@ -60,6 +60,7 @@ How each section of the system design is realised in code and on AWS.
 | Lambda `Triage` | the agent | Python 3.13 arm64, 1769 MB, 5 min, DLQ, X-Ray |
 | Lambda `Ingest` | index sync | reserved concurrency 1 by default; `-c ingest_reserved_concurrency=0` where the account limit rejects it |
 | Lambda `Api` | analyst API | 29 s |
+| Lambdas `LogsMcp`, `TicketsMcp`, `KnowledgeMcp` | domain MCP servers | Function URLs with IAM auth, 30 s, one role per domain |
 | EventBridge rule | alarm -> triage | prefix-filtered on `ia-` |
 | HTTP API | `/alerts`, `/reports/{id}`, `/reports/{id}/feedback` | IAM authorisation |
 | SNS topic | on-call notification | TLS-only publish |
@@ -68,8 +69,8 @@ How each section of the system design is realised in code and on AWS.
 
 IAM is per function: Bedrock `InvokeModel` only on the three named Claude models, Titan
 v2 and inference profiles; `bedrock-mantle:CreateInference` for Claude on Bedrock, or
-read access to one named secret when using a Claude API key. The three tool domains share
-the triage function's role; `logs:FilterLogEvents` only under the configured log-group
+read access to one named secret when using a Claude API key. Each MCP server's role holds
+only its domain's access; `logs:FilterLogEvents` only under the configured log-group
 prefix; table and bucket-prefix grants scoped to what each function does.
 
 ## Scaling notes

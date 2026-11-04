@@ -9,6 +9,8 @@ authors = [{ name = "Taojian Feng" }]
 dependencies = [
     "anthropic[bedrock]>=2.4,<3",
     "boto3>=1.35",
+    "httpx2>=2.10",
+    "mcp>=2.0,<3",
     "numpy>=2.0",
     "pydantic>=2.8,<3",
 ]
@@ -16,8 +18,6 @@ dependencies = [
 [project.optional-dependencies]
 # Offline analytics (MTTR, feedback quality). Not shipped to Lambda to keep the bundle small.
 analytics = ["pandas>=2.2"]
-# Expose the domain tool servers over the Model Context Protocol.
-mcp = ["mcp>=2.0"]
 
 [project.scripts]
 incident-agent = "incident_agent.cli:main"

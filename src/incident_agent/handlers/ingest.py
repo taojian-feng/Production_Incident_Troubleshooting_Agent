@@ -8,12 +8,14 @@ concurrency is 1 (see infra) so two uploads can't race on the snapshot.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote_plus
 
+from incident_agent.core.refresh import RefreshingValue
 from incident_agent.domain.models import HistoricalIncident, SourceDocument
 from incident_agent.ingestion.loaders import parse_markdown
 
@@ -55,21 +57,37 @@ async def reindex(pipeline: IngestionPipeline, docs: Iterator[SourceDocument]) -
     return await pipeline.ingest(docs)
 
 
+@functools.cache
+def _pipeline() -> RefreshingValue[IngestionPipeline]:  # pragma: no cover - needs AWS
+    import boto3  # noqa: PLC0415
+
+    from incident_agent.app import build_ingest_pipeline  # noqa: PLC0415
+    from incident_agent.config import Settings  # noqa: PLC0415
+    from incident_agent.storage.repositories import S3IndexSnapshot  # noqa: PLC0415
+
+    settings = Settings.from_env()
+    client = boto3.client("s3", region_name=settings.region)
+    return RefreshingValue(
+        version=S3IndexSnapshot(client, settings.knowledge_bucket).version,
+        build=lambda: build_ingest_pipeline(settings),
+    )
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # pragma: no cover
     """Lambda entry point."""
     del context
     import boto3  # noqa: PLC0415
 
-    from incident_agent.handlers.triage import _components, _settings  # noqa: PLC0415
+    from incident_agent.config import Settings  # noqa: PLC0415
     from incident_agent.storage.repositories import S3IndexSnapshot  # noqa: PLC0415
     from incident_agent.tools.tickets import DynamoIncidentRepository  # noqa: PLC0415
 
-    settings = _settings()
+    settings = Settings.from_env()
     s3 = boto3.client("s3", region_name=settings.region)
     table = boto3.resource("dynamodb", region_name=settings.region).Table(settings.incidents_table)
-    components = _components()
+    pipeline = _pipeline().get()
     docs = iter_s3_documents(s3, event, DynamoIncidentRepository(table))
-    stats = asyncio.run(reindex(components.pipeline, docs))
-    S3IndexSnapshot(s3, settings.knowledge_bucket).save(components.pipeline.vector)
+    stats = asyncio.run(reindex(pipeline, docs))
+    S3IndexSnapshot(s3, settings.knowledge_bucket).save(pipeline.vector)
     logger.info(json.dumps({"ingested": stats.documents, "chunks": stats.chunks}))
     return {"documents": stats.documents, "chunks": stats.chunks}
