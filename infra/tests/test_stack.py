@@ -198,3 +198,38 @@ def test_ingest_reservation_can_be_skipped_for_low_limit_accounts(
         if f["Properties"].get("Handler") == "incident_agent.handlers.ingest.handler"
     )
     assert "ReservedConcurrentExecutions" not in ingest["Properties"]
+
+
+def test_budget_alert_is_created_only_when_configured(
+    template: Template, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    template.resource_count_is("AWS::Budgets::Budget", 0)
+
+    asset = tmp_path_factory.mktemp("lambda-budget")
+    (asset / "placeholder.txt").write_text("asset")
+    app = cdk.App(
+        context={
+            "lambda_asset_path": str(asset),
+            "budget_email": "oncall@example.com",
+            "monthly_budget_usd": "20",
+        }
+    )
+    stack = IncidentAgentStack(
+        app,
+        "BudgetTest",
+        stage="test",
+        env=cdk.Environment(account="111111111111", region="us-east-1"),
+    )
+    budget = next(iter(Template.from_stack(stack).find_resources("AWS::Budgets::Budget").values()))
+    assert budget["Properties"]["Budget"]["BudgetLimit"] == {"Amount": 20, "Unit": "USD"}
+    alerts = budget["Properties"]["NotificationsWithSubscribers"]
+    assert [
+        (a["Notification"]["NotificationType"], a["Notification"]["Threshold"]) for a in alerts
+    ] == [
+        ("ACTUAL", 80),
+        ("ACTUAL", 100),
+        ("FORECASTED", 100),
+    ]
+    assert alerts[0]["Subscribers"] == [
+        {"SubscriptionType": "EMAIL", "Address": "oncall@example.com"}
+    ]

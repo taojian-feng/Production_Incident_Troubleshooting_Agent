@@ -25,6 +25,7 @@ from aws_cdk import (
 from aws_cdk import aws_apigatewayv2 as apigw
 from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
+from aws_cdk import aws_budgets as budgets
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
@@ -58,10 +59,6 @@ class IncidentAgentStack(Stack):
         log_prefix: str = self.node.try_get_context("log_group_prefix") or "/app/"
         # Name of a Secrets Manager secret holding a Claude API key; unset means Bedrock.
         key_secret: str | None = self.node.try_get_context("anthropic_key_secret")
-        # New accounts have a Lambda limit of 10, which rejects any reservation; 0 skips it.
-        reserved_context = self.node.try_get_context("ingest_reserved_concurrency")
-        # CLI context values arrive as strings.
-        ingest_reserved = 1 if reserved_context is None else int(reserved_context)
 
         # ------------------------------------------------------------------ storage
         bucket = s3.Bucket(
@@ -168,7 +165,7 @@ class IncidentAgentStack(Stack):
             timeout=Duration.minutes(5),
             memory=1769,
             # Serialises index snapshot writes. Without it, concurrent uploads can lose entries.
-            reserved_concurrent_executions=ingest_reserved or None,
+            reserved_concurrent_executions=self._ingest_reservation(),
         )
         api_fn = function(
             "Api",
@@ -180,6 +177,7 @@ class IncidentAgentStack(Stack):
 
         # ------------------------------------------------------------------ permissions
         self._allow_models(triage, ingest, key_secret)
+        self._add_budget_alert(stage)
         for fn in (triage, ingest):
             bucket.grant_read_write(fn, "index/*")
         bucket.grant_read(ingest, "knowledge/*")
@@ -305,6 +303,46 @@ class IncidentAgentStack(Stack):
         CfnOutput(self, "KnowledgeBucket", value=bucket.bucket_name)
         CfnOutput(self, "IncidentsTable", value=incidents.table_name)
         CfnOutput(self, "NotificationTopic", value=topic.topic_arn)
+
+    def _ingest_reservation(self) -> int | None:
+        """Default 1. New accounts have a Lambda limit of 10, which rejects any reservation."""
+        configured = self.node.try_get_context("ingest_reserved_concurrency")
+        # CLI context values arrive as strings; 0 skips the reservation.
+        return (1 if configured is None else int(configured)) or None
+
+    def _add_budget_alert(self, stage: str) -> None:
+        """Email on account-wide AWS spend. Both context values are needed to create it."""
+        email: str | None = self.node.try_get_context("budget_email")
+        limit = self.node.try_get_context("monthly_budget_usd")
+        if not email or not limit:
+            return
+        alerts = (("ACTUAL", 80), ("ACTUAL", 100), ("FORECASTED", 100))
+        budgets.CfnBudget(
+            self,
+            "MonthlyBudget",
+            budget=budgets.CfnBudget.BudgetDataProperty(
+                budget_name=f"incident-agent-{stage}",
+                budget_type="COST",
+                time_unit="MONTHLY",
+                budget_limit=budgets.CfnBudget.SpendProperty(amount=float(limit), unit="USD"),
+            ),
+            notifications_with_subscribers=[
+                budgets.CfnBudget.NotificationWithSubscribersProperty(
+                    notification=budgets.CfnBudget.NotificationProperty(
+                        notification_type=kind,
+                        comparison_operator="GREATER_THAN",
+                        threshold=percent,
+                        threshold_type="PERCENTAGE",
+                    ),
+                    subscribers=[
+                        budgets.CfnBudget.SubscriberProperty(
+                            subscription_type="EMAIL", address=email
+                        )
+                    ],
+                )
+                for kind, percent in alerts
+            ],
+        )
 
     def _allow_models(
         self, triage: lambda_.Function, ingest: lambda_.Function, key_secret: str | None

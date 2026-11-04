@@ -81,6 +81,7 @@ aws cloudwatch put-metric-alarm --alarm-name ia-payments-api-5xx \
 | `-c alarm_name_prefix=` | `ia-` | Which alarms trigger triage |
 | `-c log_group_prefix=` | `/app/` | Log groups the triage role may read |
 | `-c ingest_reserved_concurrency=` | `1` | Use `0` where the account's Lambda limit is too low to reserve; then upload knowledge one file at a time |
+| `-c budget_email=` and `-c monthly_budget_usd=` | unset | Email at 80% and 100% of actual AWS spend and 100% of forecast. Covers the whole account, not Anthropic API usage. Set both or no budget is created |
 | `-c ui_origins=` | `http://localhost:5173` | CORS origins for the analyst UI |
 
 ## Before production: verify
