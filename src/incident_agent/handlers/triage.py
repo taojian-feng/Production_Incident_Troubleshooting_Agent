@@ -1,7 +1,8 @@
 """Lambda: EventBridge (CloudWatch alarm -> ALARM) or async API invoke -> triage report.
 
-Heavy objects (clients, the loaded index) are built once per execution
-environment via ``functools.cache`` and reused across warm invocations.
+Heavy objects (clients, the loaded index) are reused across warm invocations.
+Components are rebuilt when the S3 index snapshot changes, so new knowledge is
+used without waiting for a cold start.
 """
 
 from __future__ import annotations
@@ -16,9 +17,10 @@ import boto3
 
 from incident_agent.app import Components, build_aws_components
 from incident_agent.config import Settings
+from incident_agent.core.refresh import RefreshingValue
 from incident_agent.domain.models import Alert, TriageReport
 from incident_agent.observability.metrics import MetricsLogger, record_triage
-from incident_agent.storage.repositories import DynamoReportStore
+from incident_agent.storage.repositories import DynamoReportStore, S3IndexSnapshot
 
 if TYPE_CHECKING:
     from incident_agent.storage.repositories import ReportStore
@@ -33,8 +35,17 @@ def _settings() -> Settings:
 
 
 @functools.cache
+def _refreshing_components() -> RefreshingValue[Components]:  # pragma: no cover - needs AWS
+    settings = _settings()
+    client = boto3.client("s3", region_name=settings.region)
+    return RefreshingValue(
+        version=S3IndexSnapshot(client, settings.knowledge_bucket).version,
+        build=lambda: build_aws_components(settings),
+    )
+
+
 def _components() -> Components:  # pragma: no cover - exercised in AWS
-    return build_aws_components(_settings())
+    return _refreshing_components().get()
 
 
 @functools.cache

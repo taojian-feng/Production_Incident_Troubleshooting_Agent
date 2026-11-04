@@ -8,13 +8,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 import boto3
+import numpy as np
 import pytest
+from botocore.exceptions import ClientError
+from botocore.stub import Stubber
 from moto import mock_aws
 
 from incident_agent.app import Components
 from incident_agent.domain import Alert, Feedback, HistoricalIncident, RetrievalMode, Severity
 from incident_agent.domain.state import RetrievalPlan
+from incident_agent.domain.values import Chunk
 from incident_agent.handlers.ingest import iter_s3_documents, reindex
+from incident_agent.retrieval.vector import InMemoryVectorIndex
 from incident_agent.storage.repositories import (
     DynamoFeedbackStore,
     DynamoReportStore,
@@ -103,6 +108,32 @@ class TestDynamo:
 
 @pytest.mark.usefixtures("aws")
 class TestS3:
+    def test_snapshot_version_changes_when_a_new_snapshot_is_saved(self) -> None:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.create_bucket(Bucket="kb-bucket")
+        snapshot = S3IndexSnapshot(s3, "kb-bucket")
+        assert snapshot.version() is None
+
+        index = InMemoryVectorIndex(dim=2)
+        snapshot.save(index)
+        empty_version = snapshot.version()
+        assert empty_version is not None
+
+        chunk = Chunk(chunk_id="c1", doc_id="d1", text="x")
+        index.upsert([chunk], np.array([[1.0, 0.0]], dtype=np.float32))
+        snapshot.save(index)
+        assert snapshot.version() != empty_version
+
+    def test_snapshot_version_raises_when_access_is_denied(self) -> None:
+        s3 = boto3.client("s3", region_name=REGION)
+        denied = ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject")
+        with Stubber(s3) as stub:
+            stub.add_client_error(
+                "head_object", service_error_code=denied.response["Error"]["Code"]
+            )
+            with pytest.raises(ClientError):
+                S3IndexSnapshot(s3, "kb-bucket").version()
+
     async def test_snapshot_and_s3_ingest(self, local: Components, samples: Any) -> None:
         s3 = boto3.client("s3", region_name=REGION)
         s3.create_bucket(Bucket="kb-bucket")

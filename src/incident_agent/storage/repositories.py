@@ -107,6 +107,16 @@ class S3IndexSnapshot:
     bucket: str
     prefix: str = "index/"
 
+    def version(self) -> str | None:
+        """ETag of ``chunks.jsonl``, which ``save`` writes last; ``None`` if no snapshot exists."""
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=f"{self.prefix}chunks.jsonl")
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return None
+            raise
+        return head["ETag"]
+
     def save(self, index: InMemoryVectorIndex) -> None:
         """Upload ``vectors.npz`` and ``chunks.jsonl``."""
         npz, jsonl = index.to_bytes()

@@ -45,6 +45,20 @@ aws s3 cp build/ s3://<KnowledgeBucket>/knowledge/ --recursive --exclude "*" --i
 ```
 
 Each upload triggers the ingest Lambda, which re-indexes and writes `index/` snapshots.
+Running functions check the snapshot on every invocation and reload it when it changes,
+so new knowledge is used on the next triage without a restart.
+
+## Try it with a synthetic service
+
+`data/synthetic/orders-api` holds made-up runbooks and past incidents for a service that
+does not exist. The script loads them, creates the `/app/orders-api` log group and the
+`ia-orders-api-5xx` alarm, and then simulates a cache failover that trips the alarm:
+
+```bash
+uv run python scripts/synthetic_orders_incident.py load-knowledge
+uv run python scripts/synthetic_orders_incident.py setup
+uv run python scripts/synthetic_orders_incident.py fire
+```
 
 ## Connect an alarm
 

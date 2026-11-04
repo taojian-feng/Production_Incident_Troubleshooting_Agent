@@ -116,3 +116,21 @@ class TestHybrid:
         hits = await retriever.search(plan, k=2, filters={"service": "unknown"})
         assert hits
         assert hits[0].chunk.chunk_id == "c"
+
+
+def test_snapshot_load_rejects_vectors_and_chunks_from_different_writes() -> None:
+    index = InMemoryVectorIndex(dim=2)
+    index.upsert(
+        [Chunk(chunk_id="c1", doc_id="d1", text="one")],
+        np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+    old_npz, old_jsonl = index.to_bytes()
+    index.upsert(
+        [Chunk(chunk_id="c2", doc_id="d2", text="two")],
+        np.array([[0.0, 1.0]], dtype=np.float32),
+    )
+    new_npz, _ = index.to_bytes()
+
+    assert len(InMemoryVectorIndex.from_bytes(old_npz, old_jsonl)) == 1
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        InMemoryVectorIndex.from_bytes(new_npz, old_jsonl)
