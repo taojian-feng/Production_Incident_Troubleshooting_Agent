@@ -1,9 +1,10 @@
 """Dense vector index: NumPy matrix + cosine similarity.
 
 A Lambda-friendly vector store: embeddings live in a single ``float32`` matrix
-that is persisted to S3 as an ``.npz`` + JSON-lines snapshot and loaded on cold
-start. Search is one vectorised matrix-vector product (no Python loop over
-rows) followed by ``argpartition`` for O(n) top-k.
+that is persisted to S3 as an ``.npz`` + JSON-lines snapshot, loaded on cold
+start and reloaded whenever the snapshot changes. Search is one vectorised
+matrix-vector product (no Python loop over rows) followed by ``argpartition``
+for O(n) top-k.
 
 This comfortably serves tens of thousands of chunks per service domain. The
 :class:`VectorStore` protocol is the seam for swapping in OpenSearch
@@ -128,6 +129,10 @@ class InMemoryVectorIndex:
         with np.load(io.BytesIO(npz), allow_pickle=False) as data:
             matrix = data["matrix"].astype(np.float32)
         chunks = [Chunk(**json.loads(line)) for line in jsonl.decode().splitlines() if line]
+        if matrix.shape[0] != len(chunks):
+            # The two files are written separately, so a reader can catch them mid-update.
+            msg = f"snapshot mismatch: {matrix.shape[0]} vectors, {len(chunks)} chunks"
+            raise ValueError(msg)
         index = cls(dim=matrix.shape[1])
         index._matrix = matrix
         index._chunks = chunks

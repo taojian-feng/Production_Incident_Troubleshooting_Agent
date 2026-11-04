@@ -1,0 +1,38 @@
+[
+  {
+    "incident_id": "INC0050101",
+    "service": "orders-api",
+    "title": "Checkout 503s after orders-cache failover",
+    "summary": "orders-api returned 503 for 6% of checkouts; ERR_CACHE_TIMEOUT and READONLY replica errors followed an ElastiCache failover.",
+    "root_cause": "The client kept pooled connections to the demoted primary after an orders-cache failover, and writes failed until connections were recycled.",
+    "resolution": "Restarted orders-api with a rolling deployment; clients reconnected through the primary endpoint and errors cleared in 4 minutes.",
+    "severity": "SEV2",
+    "opened_at": "2026-08-19T09:12:00Z",
+    "resolved_at": "2026-08-19T09:41:00Z",
+    "tags": ["synthetic", "redis", "failover"]
+  },
+  {
+    "incident_id": "INC0050233",
+    "service": "orders-api",
+    "title": "Flash sale overloaded the session cache",
+    "summary": "ERR_CACHE_TIMEOUT spiked during a flash sale with orders-cache engine CPU at 97%; no failover occurred.",
+    "root_cause": "A single hot promotion key saturated the primary node during peak traffic.",
+    "resolution": "Scaled orders-cache one node size up and set orders.cache.read_through=false until traffic fell.",
+    "severity": "SEV2",
+    "opened_at": "2026-09-27T18:03:00Z",
+    "resolved_at": "2026-09-27T18:55:00Z",
+    "tags": ["synthetic", "redis", "capacity"]
+  },
+  {
+    "incident_id": "INC0050377",
+    "service": "orders-api",
+    "title": "Orders failing at inventory reservation",
+    "summary": "ERR_INVENTORY_UNAVAILABLE on 11% of orders; the inventory-client circuit breaker opened after an inventory-service deploy.",
+    "root_cause": "An inventory-service deploy exhausted its database connections and returned 503s.",
+    "resolution": "Enabled orders.inventory.soft_reservation and the inventory team rolled back their deploy.",
+    "severity": "SEV1",
+    "opened_at": "2026-10-08T13:20:00Z",
+    "resolved_at": "2026-10-08T14:02:00Z",
+    "tags": ["synthetic", "inventory", "dependency"]
+  }
+]
