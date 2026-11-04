@@ -31,3 +31,5 @@ jobs:
         run: uv run pytest infra/tests -q
       - name: Offline benchmark
         run: uv run incident-agent benchmark
+      - name: Offline evaluation harness
+        run: uv run incident-agent eval

@@ -31,7 +31,11 @@ class TestEndToEnd:
         assert "INC0041877" in {e.ref for e in report.evidence}
         assert [r.node for r in state.history] == ["plan", "gather", "reason"]
         assert report.cost.usd > 0
-        assert report.cost.by_model == {"anthropic.claude-opus-5-5": report.cost.usd}
+        assert set(report.cost.by_model) == {
+            "anthropic.claude-opus-5-5",  # writes the report for this SEV1
+            "anthropic.claude-haiku-5-5",  # checks that its sources support it
+        }
+        assert sum(report.cost.by_model.values()) == pytest.approx(report.cost.usd)
 
     async def test_hallucinated_step_flags_report(self, payments_alert: Alert) -> None:
         components = await build_local_components(llm=ScriptedLLM(hallucinate=True))
@@ -40,6 +44,41 @@ class TestEndToEnd:
         flagged = [s for s in report.steps if not s.verified]
         assert len(flagged) == 1
         assert flagged[0].review_reason == "no citations"
+
+    async def test_grounding_check_flags_a_step_and_routes_the_report_to_review(
+        self, payments_alert: Alert
+    ) -> None:
+        components = await build_local_components(llm=ScriptedLLM(unsupported_steps=frozenset({1})))
+        report, _ = await components.agent.run(payments_alert)
+        assert report.status == ReportStatus.NEEDS_REVIEW
+        reason = report.steps[0].review_reason
+        assert reason == "sources do not support this: scripted verdict"
+        assert all(step.verified for step in report.steps[1:])
+
+    async def test_tool_metrics_count_only_the_current_run(
+        self, local: Components, payments_alert: Alert
+    ) -> None:
+        counts = []
+        for _ in range(2):
+            report, _state = await local.agent.run(payments_alert)
+            stream = io.StringIO()
+            record_triage(MetricsLogger({"Service": "s"}, stream=stream), report, local.registry)
+            counts.append(json.loads(stream.getvalue())["ToolCallSuccess"])
+        assert counts == [3, 3]
+
+    async def test_generic_alarm_text_finds_past_incidents_through_its_logs(
+        self, local: Components
+    ) -> None:
+        alarm = Alert(
+            service="payments-api",
+            title="ia-payments-5xx",
+            description="Threshold Crossed: 1 datapoint [6.5] was above the threshold (2.0).",
+            severity=Severity.SEV2,
+        )
+        report, state = await local.agent.run(alarm)
+        assert {e.source for e in report.evidence} >= {EvidenceSource.LOGS, EvidenceSource.TICKETS}
+        assert "INC0041877" in {e.ref for e in report.evidence}
+        assert state.alert == alarm  # log text is used to search, not to change the alert
 
     async def test_tool_failure_degrades_gracefully(
         self, local: Components, payments_alert: Alert

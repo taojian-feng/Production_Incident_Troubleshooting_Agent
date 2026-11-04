@@ -6,7 +6,7 @@ to grade itself. A step is ``verified`` only if:
 1. it cites at least one evidence id,
 2. every cited id exists in the evidence actually shown to the model,
 3. every concrete identifier the step mentions (ticket ids, error codes)
-   appears in at least one of the evidence items it cites.
+   appears in the alert or in at least one of the evidence items it cites.
 
 Failing any check flags the step (and therefore the report) for human review.
 """
@@ -27,7 +27,9 @@ if TYPE_CHECKING:
 STEP_ORDER: tuple[StepKind, ...] = (StepKind.SUMMARY, StepKind.PRECEDENT, StepKind.RECOMMENDATION)
 
 
-def _check(step: LLMTriageStep, evidence_by_id: Mapping[str, Evidence]) -> str | None:
+def _check(
+    step: LLMTriageStep, evidence_by_id: Mapping[str, Evidence], alert_text: str
+) -> str | None:
     """Return why ``step`` is not grounded, or ``None`` if it is."""
     if not step.citations:
         return "no citations"
@@ -39,14 +41,14 @@ def _check(step: LLMTriageStep, evidence_by_id: Mapping[str, Evidence]) -> str |
         for c in step.citations
     )
     claimed = set(extract_ticket_ids(step.content)) | set(extract_error_codes(step.content))
-    unsupported = sorted(i for i in claimed if i not in cited_text)
+    unsupported = sorted(i for i in claimed if i not in cited_text and i not in alert_text)
     if unsupported:
         return f"identifiers not found in cited evidence: {unsupported}"
     return None
 
 
 def validate_steps(
-    steps: Sequence[LLMTriageStep], evidence: Sequence[Evidence]
+    steps: Sequence[LLMTriageStep], evidence: Sequence[Evidence], alert_text: str = ""
 ) -> list[TriageStep]:
     """Order steps canonically, number them, and attach verification results.
 
@@ -56,7 +58,7 @@ def validate_steps(
     ordered = sorted(steps, key=lambda s: STEP_ORDER.index(s.kind))
     validated: list[TriageStep] = []
     for number, step in enumerate(ordered, start=1):
-        reason = _check(step, evidence_by_id)
+        reason = _check(step, evidence_by_id, alert_text)
         validated.append(
             TriageStep(
                 number=number,

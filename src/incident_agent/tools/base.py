@@ -1,8 +1,8 @@
 """Domain-governed tool servers (design section 2.3).
 
-Each business domain (logs, tickets, knowledge) is its own tool server with
-its own IAM role scope, instead of one monolithic server. Inside the Lambda
-runtime the agent calls them in-process through :class:`ToolRegistry`, which
+Each business domain (logs, tickets, knowledge) is its own tool server instead
+of one monolithic server. Inside the Lambda runtime the agent calls them
+in-process through :class:`ToolRegistry`, which
 enforces a role -> domain access policy and records per-tool success metrics.
 ``tools.mcp_server`` exposes the very same objects over MCP for external
 clients.
@@ -70,6 +70,17 @@ class ToolRegistry:
     successes: Counter[EvidenceSource] = field(default_factory=Counter)
     failures: Counter[EvidenceSource] = field(default_factory=Counter)
     latency_ms: dict[EvidenceSource, float] = field(default_factory=dict)
+
+    def drain_counts(self) -> tuple[int, int]:
+        """Return ``(successes, failures)`` since the last drain, then reset them.
+
+        A warm Lambda keeps this registry between invocations, so each run's
+        metrics must count only that run.
+        """
+        counts = sum(self.successes.values()), sum(self.failures.values())
+        self.successes.clear()
+        self.failures.clear()
+        return counts
 
     def allowed(self) -> frozenset[EvidenceSource]:
         """Domains this registry's role may call."""

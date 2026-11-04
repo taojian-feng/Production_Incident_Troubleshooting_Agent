@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from incident_agent.core.timing import Stopwatch
-from incident_agent.domain.enums import RetrievalMode, StepKind
+from incident_agent.domain.enums import EvidenceSource, RetrievalMode, StepKind
 from incident_agent.domain.models import TriageReport, TriageStep
 from incident_agent.domain.state import AgentState
 from incident_agent.llm.router import CostLedger
@@ -22,10 +22,25 @@ from incident_agent.reasoning.context import ContextBudget, select_evidence
 from incident_agent.retrieval.hybrid import plan_retrieval
 
 if TYPE_CHECKING:
-    from incident_agent.domain.enums import EvidenceSource
     from incident_agent.domain.models import Alert
     from incident_agent.reasoning.engine import ReasoningEngine
     from incident_agent.tools.base import RawEvidence, ToolRegistry
+
+
+_LOG_SIGNALS: Final = 3
+_LOG_SIGNAL_CHARS: Final = 200
+
+
+def _with_log_signals(alert: Alert, log_evidence: list[RawEvidence]) -> Alert:
+    """Return a copy of ``alert`` for searching, with its top log errors added.
+
+    Used only to search. The model still sees the original alert and the logs as evidence.
+    """
+    signals = [e.snippet.partition(" ")[2][:_LOG_SIGNAL_CHARS] for e in log_evidence]
+    if not signals:
+        return alert
+    text = "\n".join([alert.description, *signals[:_LOG_SIGNALS]]).strip()
+    return alert.model_copy(update={"description": text})
 
 
 @dataclass(slots=True)
@@ -60,16 +75,31 @@ class TriageAgent:
 
         async def gather(state: AgentState) -> None:
             assert state.plan is not None  # noqa: S101 - graph ordering invariant
-            domains = sorted(self.tools.allowed(), key=lambda d: d.value)
+            allowed = self.tools.allowed()
+            # Logs run first: an alarm's own text is often generic, and the errors it
+            # points to are the best search terms for past incidents and runbooks.
+            logs_branch = state.fork()
+            log_evidence = (
+                await self._gather_domain(EvidenceSource.LOGS, logs_branch)
+                if EvidenceSource.LOGS in allowed
+                else []
+            )
+            search_alert = _with_log_signals(state.alert, log_evidence)
+            state.plan = plan_retrieval(search_alert)
+
+            domains = sorted(allowed - {EvidenceSource.LOGS}, key=lambda d: d.value)
             # Each branch works on its own deep-copied fork so concurrent
             # branches can never mutate shared lists (see domain.state).
             branches = [state.fork() for _ in domains]
+            for branch in branches:
+                branch.alert = search_alert
             results = await asyncio.gather(
                 *(self._gather_domain(d, b) for d, b in zip(domains, branches, strict=True))
             )
-            raw: list[RawEvidence] = [item for batch in results for item in batch]
+            raw: list[RawEvidence] = [*log_evidence, *(item for batch in results for item in batch)]
             state.evidence = select_evidence(raw, self.budget)
-            state.merge_evidence(*branches)  # collects per-branch errors back into the parent
+            # Collects per-branch errors back into the parent.
+            state.merge_evidence(logs_branch, *branches)
             state.notes["tool_successes"] = str(dict(self.tools.successes))
 
         async def reason(state: AgentState) -> None:
