@@ -12,9 +12,11 @@ How each section of the system design is realised in code and on AWS.
 2. **Plan** (`retrieval/hybrid.py` `plan_retrieval`). Deterministic, no LLM spend: alerts
    dominated by identifiers (ticket ids, error codes) use keyword search, prose-only
    alerts use vector search, mixed alerts use both with reciprocal rank fusion.
-3. **Gather** (`orchestration/agent.py`). The three domain tool servers run concurrently,
-   each on its own forked copy of the state, through `ToolRegistry`, which enforces the
-   role -> domain policy and records success/failure/latency.
+3. **Gather** (`orchestration/agent.py`). Logs run first, and their top errors are added to
+   the search terms and the plan is recalculated, because an alarm's own text is often
+   generic. Tickets and knowledge then run concurrently, each on its own forked copy of the
+   state. Every call goes through `ToolRegistry`, which enforces the role -> domain policy and
+   records success/failure/latency.
 4. **Context engineering** (`reasoning/context.py`). At most N items per domain,
    round-robin across domains, under a character budget, numbered `E1..En`.
 5. **Reason** (`reasoning/engine.py`). The router picks a model by task and severity;

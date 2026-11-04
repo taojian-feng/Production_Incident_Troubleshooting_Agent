@@ -66,6 +66,20 @@ class TestEndToEnd:
             counts.append(json.loads(stream.getvalue())["ToolCallSuccess"])
         assert counts == [3, 3]
 
+    async def test_generic_alarm_text_finds_past_incidents_through_its_logs(
+        self, local: Components
+    ) -> None:
+        alarm = Alert(
+            service="payments-api",
+            title="ia-payments-5xx",
+            description="Threshold Crossed: 1 datapoint [6.5] was above the threshold (2.0).",
+            severity=Severity.SEV2,
+        )
+        report, state = await local.agent.run(alarm)
+        assert {e.source for e in report.evidence} >= {EvidenceSource.LOGS, EvidenceSource.TICKETS}
+        assert "INC0041877" in {e.ref for e in report.evidence}
+        assert state.alert == alarm  # log text is used to search, not to change the alert
+
     async def test_tool_failure_degrades_gracefully(
         self, local: Components, payments_alert: Alert
     ) -> None:
