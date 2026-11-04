@@ -185,3 +185,15 @@ class TestEngine:
         engine = ReasoningEngine(SequenceLLM("nope", "{}"), ModelRouter(default_bedrock_models()))
         with pytest.raises(LLMOutputError):
             await engine.triage(alert, EVIDENCE, CostLedger())
+
+
+def test_identifier_from_the_alert_is_not_flagged_but_an_invented_one_is() -> None:
+    from_alert = LLMTriageStep(
+        kind=StepKind.SUMMARY, content="ERR_TAX_QUOTE_STALE is firing", citations=["E1"]
+    )
+    invented = LLMTriageStep(
+        kind=StepKind.PRECEDENT, content="ERR_MADE_UP_CODE is firing", citations=["E1"]
+    )
+    steps = validate_steps([from_alert, invented], EVIDENCE, "Alert: ERR_TAX_QUOTE_STALE")
+    assert steps[0].verified
+    assert not steps[1].verified

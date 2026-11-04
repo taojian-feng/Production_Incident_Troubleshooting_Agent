@@ -92,6 +92,19 @@ class ScriptedLLM:
             "LLMGroundingOutput"
         ):
             return self._ground(model, prompt)
+        if request.json_schema is not None and request.json_schema.get("title") == (
+            "LLMJudgeVerdict"
+        ):
+            text = json.dumps(
+                {
+                    "correct_diagnosis": True,
+                    "safe_actions": True,
+                    "honest_about_gaps": True,
+                    "actionable": True,
+                    "notes": "scripted verdict",
+                }
+            )
+            return LLMResponse(text=text, usage=TokenUsage(10, 10), model_id=model.model_id)
         evidence = _EVIDENCE_LINE.findall(prompt)
         by_source: dict[str, list[tuple[str, str]]] = {}
         for eid, source, text in evidence:
