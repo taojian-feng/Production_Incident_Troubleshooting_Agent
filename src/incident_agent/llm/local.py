@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 _EVIDENCE_LINE = re.compile(r"^\[(E\d+)\]\s*\((\w+)\)\s*(.*)$", re.MULTILINE)
+_STEP_LINE = re.compile(r"^STEP (\d+) \(", re.MULTILINE)
 
 
 class HashingEmbedder:
@@ -58,17 +59,39 @@ class ScriptedLLM:
 
     Mirrors the contract the real model is held to: every step cites evidence
     ids that appear in the prompt. Set ``hallucinate=True`` to emit an uncited
-    claim and exercise the citation validator.
+    claim and exercise the citation validator, or ``unsupported_steps`` to have
+    the grounding check reject those step numbers.
     """
 
-    def __init__(self, *, hallucinate: bool = False) -> None:
+    def __init__(
+        self, *, hallucinate: bool = False, unsupported_steps: frozenset[int] = frozenset()
+    ) -> None:
         self.hallucinate = hallucinate
+        self.unsupported_steps = unsupported_steps
         self.calls: list[tuple[str, LLMRequest]] = []
 
+    def _ground(self, model: ModelSpec, prompt: str) -> LLMResponse:
+        """Approve every step, apart from any listed in ``unsupported_steps``."""
+        verdicts = [
+            {
+                "step_number": number,
+                "supported": number not in self.unsupported_steps,
+                "reason": "scripted verdict",
+            }
+            for number in (int(n) for n in _STEP_LINE.findall(prompt))
+        ]
+        text = json.dumps({"verdicts": verdicts})
+        usage = TokenUsage(input_tokens=len(prompt) // 4, output_tokens=len(text) // 4)
+        return LLMResponse(text=text, usage=usage, model_id=model.model_id)
+
     async def complete(self, model: ModelSpec, request: LLMRequest) -> LLMResponse:
-        """Return a schema-valid JSON triage built from ``[E#]`` evidence lines."""
+        """Return schema-valid JSON: a triage from ``[E#]`` lines, or grounding verdicts."""
         self.calls.append((model.model_id, request))
         prompt = request.messages[-1].content
+        if request.json_schema is not None and request.json_schema.get("title") == (
+            "LLMGroundingOutput"
+        ):
+            return self._ground(model, prompt)
         evidence = _EVIDENCE_LINE.findall(prompt)
         by_source: dict[str, list[tuple[str, str]]] = {}
         for eid, source, text in evidence:

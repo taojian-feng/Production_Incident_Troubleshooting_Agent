@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from incident_agent.domain.models import Alert, Evidence, TriageStep
     from incident_agent.llm.base import LLMProvider
     from incident_agent.llm.router import CostLedger, ModelRouter
+    from incident_agent.reasoning.grounding import GroundingChecker
 
 SYSTEM_PROMPT: Final = """\
 You are a production incident triage assistant for a regulated FinTech platform.
@@ -57,6 +58,7 @@ class ReasoningEngine:
     llm: LLMProvider
     router: ModelRouter
     max_tokens: int = 4096
+    grounding: GroundingChecker | None = None
 
     async def triage(
         self, alert: Alert, evidence: Sequence[Evidence], ledger: CostLedger
@@ -96,4 +98,7 @@ class ReasoningEngine:
             except ValidationError as exc:
                 msg = "model output failed schema validation twice"
                 raise LLMOutputError(msg) from exc
-        return validate_steps(parsed.steps, evidence)
+        steps = validate_steps(parsed.steps, evidence)
+        if self.grounding is None:
+            return steps
+        return await self.grounding.check(alert, steps, evidence, ledger)

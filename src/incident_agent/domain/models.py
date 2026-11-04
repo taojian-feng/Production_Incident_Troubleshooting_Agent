@@ -177,6 +177,20 @@ class LLMTriageOutput(FrozenModel):
     steps: list[LLMTriageStep] = Field(min_length=1)
 
 
+class LLMGroundingVerdict(FrozenModel):
+    """Whether one step's cited sources support it."""
+
+    step_number: int
+    supported: bool
+    reason: str
+
+
+class LLMGroundingOutput(FrozenModel):
+    """Root object of the grounding model's structured output."""
+
+    verdicts: list[LLMGroundingVerdict]
+
+
 class TriageStep(FrozenModel):
     """A validated step in the final report."""
 

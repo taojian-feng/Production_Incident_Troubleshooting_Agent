@@ -18,6 +18,7 @@ from incident_agent.llm.local import HashingEmbedder, ScriptedLLM
 from incident_agent.llm.router import ModelRouter
 from incident_agent.orchestration.agent import TriageAgent
 from incident_agent.reasoning.engine import ReasoningEngine
+from incident_agent.reasoning.grounding import GroundingChecker
 from incident_agent.retrieval.hybrid import HybridRetriever
 from incident_agent.retrieval.keyword import BM25Index
 from incident_agent.retrieval.vector import InMemoryVectorIndex
@@ -67,7 +68,9 @@ def _assemble(
     registry = ToolRegistry(servers=servers)
     agent = TriageAgent(
         tools=registry,
-        reasoner=ReasoningEngine(llm=llm, router=router),
+        reasoner=ReasoningEngine(
+            llm=llm, router=router, grounding=GroundingChecker(llm=llm, router=router)
+        ),
         max_usd_per_run=max_usd_per_run,
     )
     pipeline = IngestionPipeline(embedder=embedder, keyword=keyword, vector=vector)
