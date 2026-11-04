@@ -33,6 +33,7 @@ class Settings:
     bedrock_rps: float = 2.0
     max_usd_per_run: float = 0.75
     log_group_prefix: str = "/app/"
+    anthropic_key_secret: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -56,4 +57,5 @@ class Settings:
             bedrock_rps=float(env.get("IA_BEDROCK_RPS", "2.0")),
             max_usd_per_run=float(env.get("IA_MAX_USD_PER_RUN", "0.75")),
             log_group_prefix=env.get("IA_LOG_GROUP_PREFIX", "/app/"),
+            anthropic_key_secret=env.get("IA_ANTHROPIC_KEY_SECRET") or None,
         )

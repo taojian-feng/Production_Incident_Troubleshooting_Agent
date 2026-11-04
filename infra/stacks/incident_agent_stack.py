@@ -34,6 +34,7 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_lambda_event_sources as sources
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sqs as sqs
 
@@ -55,6 +56,12 @@ class IncidentAgentStack(Stack):
         asset_path: str = self.node.try_get_context("lambda_asset_path") or "../build/lambda"
         alarm_prefix: str = self.node.try_get_context("alarm_name_prefix") or "ia-"
         log_prefix: str = self.node.try_get_context("log_group_prefix") or "/app/"
+        # Name of a Secrets Manager secret holding a Claude API key; unset means Bedrock.
+        key_secret: str | None = self.node.try_get_context("anthropic_key_secret")
+        # New accounts have a Lambda limit of 10, which rejects any reservation; 0 skips it.
+        reserved_context = self.node.try_get_context("ingest_reserved_concurrency")
+        # CLI context values arrive as strings.
+        ingest_reserved = 1 if reserved_context is None else int(reserved_context)
 
         # ------------------------------------------------------------------ storage
         bucket = s3.Bucket(
@@ -114,6 +121,7 @@ class IncidentAgentStack(Stack):
             "IA_LOG_GROUP_PREFIX": log_prefix,
             "IA_MAX_USD_PER_RUN": "0.75",
             "POWERTOOLS_SERVICE_NAME": "incident-agent",
+            **({"IA_ANTHROPIC_KEY_SECRET": key_secret} if key_secret else {}),
         }
 
         def function(
@@ -159,7 +167,8 @@ class IncidentAgentStack(Stack):
             "incident_agent.handlers.ingest.handler",
             timeout=Duration.minutes(5),
             memory=1769,
-            reserved_concurrent_executions=1,  # serialise index snapshot writes
+            # Serialises index snapshot writes. Without it, concurrent uploads can lose entries.
+            reserved_concurrent_executions=ingest_reserved or None,
         )
         api_fn = function(
             "Api",
@@ -170,20 +179,8 @@ class IncidentAgentStack(Stack):
         api_fn.add_environment("IA_TRIAGE_FUNCTION", triage.function_name)
 
         # ------------------------------------------------------------------ permissions
-        model_arns = [
-            *(
-                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.{m}"
-                for m in CLAUDE_MODELS
-            ),
-            f"arn:aws:bedrock:{self.region}::foundation-model/{EMBEDDING_MODEL}",
-            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
-        ]
-        bedrock = iam.PolicyStatement(
-            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-            resources=model_arns,
-        )
+        self._allow_models(triage, ingest, key_secret)
         for fn in (triage, ingest):
-            fn.add_to_role_policy(bedrock)
             bucket.grant_read_write(fn, "index/*")
         bucket.grant_read(ingest, "knowledge/*")
         incidents.grant_read_data(triage)
@@ -308,3 +305,34 @@ class IncidentAgentStack(Stack):
         CfnOutput(self, "KnowledgeBucket", value=bucket.bucket_name)
         CfnOutput(self, "IncidentsTable", value=incidents.table_name)
         CfnOutput(self, "NotificationTopic", value=topic.topic_arn)
+
+    def _allow_models(
+        self, triage: lambda_.Function, ingest: lambda_.Function, key_secret: str | None
+    ) -> None:
+        """Grant model access: both functions build the Claude client, only triage calls it."""
+        model_arns = [
+            *(
+                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.{m}"
+                for m in CLAUDE_MODELS
+            ),
+            f"arn:aws:bedrock:{self.region}::foundation-model/{EMBEDDING_MODEL}",
+            f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+        ]
+        invoke = iam.PolicyStatement(
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            resources=model_arns,
+        )
+        triage.add_to_role_policy(invoke)
+        ingest.add_to_role_policy(invoke)
+        if key_secret:
+            secret = secretsmanager.Secret.from_secret_name_v2(self, "ClaudeApiKey", key_secret)
+            secret.grant_read(triage)
+            secret.grant_read(ingest)
+            return
+        # The Mantle (Messages API) endpoint authorises its own action on Bedrock projects.
+        triage.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-mantle:CreateInference"],
+                resources=[f"arn:aws:bedrock-mantle:{self.region}:{self.account}:project/*"],
+            )
+        )

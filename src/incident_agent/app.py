@@ -29,6 +29,8 @@ from incident_agent.tools.tickets import IncidentHistoryServer, InMemoryIncident
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    import boto3
+
     from incident_agent.config import Settings
     from incident_agent.llm.base import EmbeddingProvider, LLMProvider
     from incident_agent.tools.base import ToolServer
@@ -95,15 +97,38 @@ async def build_local_components(
     return components
 
 
+def _claude_backend(  # pragma: no cover - needs AWS
+    settings: Settings, session: boto3.Session
+) -> tuple[LLMProvider, ModelRouter]:
+    """Claude API when a key secret is configured, otherwise Claude on Bedrock."""
+    from incident_agent.llm.anthropic_api import (  # noqa: PLC0415
+        ClaudeApiProvider,
+        default_api_models,
+    )
+    from incident_agent.llm.bedrock import (  # noqa: PLC0415
+        ClaudeBedrockProvider,
+        default_bedrock_models,
+    )
+
+    if settings.anthropic_key_secret:
+        secret = session.client("secretsmanager").get_secret_value(
+            SecretId=settings.anthropic_key_secret
+        )
+        return (
+            ClaudeApiProvider.from_api_key(secret["SecretString"].strip(), settings.bedrock_rps),
+            ModelRouter(default_api_models(settings.model_overrides)),
+        )
+    return (
+        ClaudeBedrockProvider.from_region(settings.region, settings.bedrock_rps),
+        ModelRouter(default_bedrock_models(settings.model_overrides)),
+    )
+
+
 def build_aws_components(settings: Settings) -> Components:  # pragma: no cover - needs AWS
     """Production stack: Bedrock, CloudWatch Logs, DynamoDB, S3 index snapshot."""
     import boto3  # noqa: PLC0415
 
-    from incident_agent.llm.bedrock import (  # noqa: PLC0415
-        ClaudeBedrockProvider,
-        TitanEmbedder,
-        default_bedrock_models,
-    )
+    from incident_agent.llm.bedrock import TitanEmbedder  # noqa: PLC0415
     from incident_agent.storage.repositories import S3IndexSnapshot  # noqa: PLC0415
     from incident_agent.tools.logs import CloudWatchLogsServer  # noqa: PLC0415
     from incident_agent.tools.tickets import DynamoIncidentRepository  # noqa: PLC0415
@@ -118,10 +143,11 @@ def build_aws_components(settings: Settings) -> Components:  # pragma: no cover 
         settings.embedding_dim
     )
     prefix = settings.log_group_prefix
+    llm, router = _claude_backend(settings, session)
     return _assemble(
-        llm=ClaudeBedrockProvider.from_region(settings.region, settings.bedrock_rps),
+        llm=llm,
         embedder=embedder,
-        router=ModelRouter(default_bedrock_models(settings.model_overrides)),
+        router=router,
         keyword=keyword,
         vector=vector,
         logs=CloudWatchLogsServer(

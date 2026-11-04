@@ -24,7 +24,7 @@ incident-agent = "incident_agent.cli:main"
 
 [dependency-groups]
 dev = [
-    "boto3-stubs[bedrock-runtime,dynamodb,logs,s3,sns,lambda]>=1.35",
+    "boto3-stubs[bedrock-runtime,dynamodb,logs,s3,secretsmanager,sns,lambda]>=1.35",
     "moto[dynamodb,s3,logs,sns]>=5.0",
     "mypy>=1.11",
     "pandas>=2.2",

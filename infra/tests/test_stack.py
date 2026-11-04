@@ -128,3 +128,73 @@ def test_bedrock_access_is_scoped_to_named_models(template: Template) -> None:
         resources = statement["Resource"]
         assert "*" not in resources
         assert any("claude-opus-5-5" in str(r) for r in resources)
+
+
+def test_claude_mantle_endpoint_is_authorised_on_projects_only(template: Template) -> None:
+    policies = template.find_resources("AWS::IAM::Policy")
+    statements = [
+        s
+        for p in policies.values()
+        for s in p["Properties"]["PolicyDocument"]["Statement"]
+        if s["Action"] == "bedrock-mantle:CreateInference"
+    ]
+    assert len(statements) >= 1, "no Mantle inference statement found"
+    for statement in statements:
+        assert statement["Resource"] != "*"
+        assert ":project/*" in str(statement["Resource"])
+
+
+def test_key_secret_grants_both_functions_read_and_skips_mantle(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    asset = tmp_path_factory.mktemp("lambda-key")
+    (asset / "placeholder.txt").write_text("asset")
+    app = cdk.App(
+        context={"lambda_asset_path": str(asset), "anthropic_key_secret": "incident-agent/key"}
+    )
+    stack = IncidentAgentStack(
+        app,
+        "KeyTest",
+        stage="test",
+        env=cdk.Environment(account="111111111111", region="us-east-1"),
+    )
+    template = Template.from_stack(stack)
+    template.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "Handler": "incident_agent.handlers.triage.handler",
+            "Environment": {
+                "Variables": Match.object_like({"IA_ANTHROPIC_KEY_SECRET": "incident-agent/key"})
+            },
+        },
+    )
+    statements = [
+        s
+        for p in template.find_resources("AWS::IAM::Policy").values()
+        for s in p["Properties"]["PolicyDocument"]["Statement"]
+    ]
+    secret_reads = [s for s in statements if "secretsmanager:GetSecretValue" in s["Action"]]
+    assert len(secret_reads) == 2
+    assert all("incident-agent/key" in str(s["Resource"]) for s in secret_reads)
+    assert not [s for s in statements if s["Action"] == "bedrock-mantle:CreateInference"]
+
+
+def test_ingest_reservation_can_be_skipped_for_low_limit_accounts(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    asset = tmp_path_factory.mktemp("lambda-limit")
+    (asset / "placeholder.txt").write_text("asset")
+    app = cdk.App(context={"lambda_asset_path": str(asset), "ingest_reserved_concurrency": "0"})
+    stack = IncidentAgentStack(
+        app,
+        "LimitTest",
+        stage="test",
+        env=cdk.Environment(account="111111111111", region="us-east-1"),
+    )
+    functions = Template.from_stack(stack).find_resources("AWS::Lambda::Function")
+    ingest = next(
+        f
+        for f in functions.values()
+        if f["Properties"].get("Handler") == "incident_agent.handlers.ingest.handler"
+    )
+    assert "ReservedConcurrentExecutions" not in ingest["Properties"]
